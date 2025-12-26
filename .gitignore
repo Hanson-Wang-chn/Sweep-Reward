@@ -1,0 +1,8 @@
+.claude
+.vscode
+.idea
+.DS_Store
+__pycache__
+*.pyc
+logs/
+doc.md

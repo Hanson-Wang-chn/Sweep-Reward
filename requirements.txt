@@ -1,0 +1,19 @@
+# Sweep-Reward: Multi-modal Ensemble Evaluation Module
+# Python >= 3.8
+
+# Core dependencies
+numpy>=1.21.0
+opencv-python>=4.5.0
+PyYAML>=6.0
+
+# Deep learning
+torch==2.7.1
+torchvision==0.22.1
+
+# API client
+requests>=2.25.0
+
+# Optional: for development and testing
+# pytest>=7.0.0
+# black>=22.0.0
+# flake8>=4.0.0
