@@ -55,6 +55,9 @@ class Preprocessor:
         self.gaussian_kernel = smoothing_cfg.get("gaussian_kernel", 5)
         self.gaussian_sigma = smoothing_cfg.get("sigma", 1.5)
 
+        # Whether to apply morphological operations to current image
+        self.preprocess_current = preprocess_cfg.get("preprocess_current", False)
+
         # Image size from system config
         system_cfg = config.get("system", {})
         self.image_size = tuple(system_cfg.get("image_size", [224, 224]))
@@ -170,16 +173,21 @@ class Preprocessor:
 
         return smoothed.astype(np.float32)
 
-    def process(self, image: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def process(
+        self, image: np.ndarray, force_morphology: bool = False
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Full preprocessing pipeline.
+        Full preprocessing pipeline for current image.
 
         Args:
             image: RGB image (H, W, 3), uint8.
+            force_morphology: If True, always apply morphological operations
+                              regardless of preprocess_current setting.
+                              Used by generate_pseudo_label.py.
 
         Returns:
             Tuple of:
-                - Binary mask (H, W), uint8, 0/255
+                - Binary mask (H, W), uint8, 0/1
                 - Soft mask (H, W), float32, [0, 1]
         """
         # Resize if needed
@@ -189,7 +197,9 @@ class Preprocessor:
         mask = self.color_segmentation(image)
 
         # Morphological operations
-        mask = self.morphological_operations(mask)
+        # Apply if preprocess_current is enabled OR force_morphology is True
+        if self.preprocess_current or force_morphology:
+            mask = self.morphological_operations(mask)
 
         # Generate soft mask
         soft_mask = self.smooth_mask(mask)
@@ -226,4 +236,8 @@ class Preprocessor:
             # Invert if more than half is white (shape is the dark part)
             binary = 1 - binary
 
-        return binary.astype(np.uint8)
+        # Apply the same morphology used for current images to keep pipelines aligned
+        binary_uint8 = (binary * 255).astype(np.uint8)
+        binary_uint8 = self.morphological_operations(binary_uint8)
+
+        return (binary_uint8 > 127).astype(np.uint8)

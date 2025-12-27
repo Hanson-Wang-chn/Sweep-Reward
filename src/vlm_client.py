@@ -54,16 +54,6 @@ class VLMClient:
         self.save_vlm_imgs = debug_cfg.get("save_vlm_imgs", False)
         self.vis_output_dir = debug_cfg.get("vis_output_dir", "./logs")
 
-        # Color segmentation parameters (HSV ranges for red)
-        preprocess_cfg = config.get("preprocess", {})
-        color_seg = preprocess_cfg.get("color_segmentation", {})
-        hsv1 = color_seg.get("hsv_range_1", {})
-        hsv2 = color_seg.get("hsv_range_2", {})
-        self.hsv_lower_1 = np.array(hsv1.get("lower", [0, 100, 70]))
-        self.hsv_upper_1 = np.array(hsv1.get("upper", [10, 255, 255]))
-        self.hsv_lower_2 = np.array(hsv2.get("lower", [170, 100, 70]))
-        self.hsv_upper_2 = np.array(hsv2.get("upper", [180, 255, 255]))
-
     def _default_system_prompt(self) -> str:
         """Return default system prompt."""
         return """# Role
@@ -120,34 +110,9 @@ class VLMClient:
 
         return binary_rgb
 
-    def extract_mask_from_image(self, image: np.ndarray) -> np.ndarray:
-        """
-        Extract binary mask from RGB image using HSV color segmentation.
-
-        Args:
-            image: RGB image (H, W, 3), uint8.
-
-        Returns:
-            Binary mask (H, W), values 0/1.
-        """
-        # Convert RGB to HSV
-        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-
-        # Create masks for both red ranges
-        mask1 = cv2.inRange(hsv, self.hsv_lower_1, self.hsv_upper_1)
-        mask2 = cv2.inRange(hsv, self.hsv_lower_2, self.hsv_upper_2)
-
-        # Combine masks
-        mask = cv2.bitwise_or(mask1, mask2)
-
-        # Convert to binary 0/1
-        binary_mask = (mask > 127).astype(np.uint8)
-
-        return binary_mask
-
     def create_comparison_image(
         self,
-        current_image: np.ndarray,
+        current_mask: np.ndarray,
         goal_mask: np.ndarray,
     ) -> np.ndarray:
         """
@@ -155,14 +120,13 @@ class VLMClient:
         Both images are binary (black-white).
 
         Args:
-            current_image: Current RGB image (H, W, 3), uint8.
+            current_mask: Binary mask for current image (H, W), values 0/1.
             goal_mask: Binary goal mask (H, W), values 0/1.
 
         Returns:
             Concatenated comparison image (H, 2W, 3), uint8.
         """
-        # Extract mask from current image and convert to binary image
-        current_mask = self.extract_mask_from_image(current_image)
+        # Convert masks to binary RGB images
         current_binary = self.mask_to_binary_image(current_mask)
 
         # Convert goal mask to binary image
@@ -344,7 +308,7 @@ class VLMClient:
 
     def compute(
         self,
-        current_image: np.ndarray,
+        current_mask: np.ndarray,
         goal_mask: np.ndarray,
         image_index: int = 0,
     ) -> Dict[str, Any]:
@@ -352,7 +316,7 @@ class VLMClient:
         Compute VLM perceptual score.
 
         Args:
-            current_image: Current RGB image (H, W, 3), uint8.
+            current_mask: Binary current mask (H, W), values 0/1.
             goal_mask: Binary goal mask (H, W), values 0/1.
             image_index: Index for distinguishing multiple VLM calls when saving images.
 
@@ -362,7 +326,7 @@ class VLMClient:
                 - reasoning: VLM's reasoning text
         """
         # Create comparison image
-        comparison = self.create_comparison_image(current_image, goal_mask)
+        comparison = self.create_comparison_image(current_mask, goal_mask)
 
         # Save VLM input image if debugging is enabled
         self._save_vlm_input_image(comparison, image_index)

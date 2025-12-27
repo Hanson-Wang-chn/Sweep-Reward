@@ -380,7 +380,7 @@ def run_multi_image_evaluation(
                 def call_vlm(idx_and_result):
                     idx, result = idx_and_result
                     try:
-                        vlm_result = vlm_client.compute(result["current_image"], goal_processed, image_index=idx)
+                        vlm_result = vlm_client.compute(result["pred_mask"], goal_processed, image_index=idx)
                         return idx, vlm_result
                     except Exception as e:
                         logger.warning(f"VLM call failed for {result['image_path']}: {e}")

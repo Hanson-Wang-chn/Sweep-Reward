@@ -180,7 +180,7 @@ class Evaluator:
 
         # Compute perceptual score (VLM)
         try:
-            vlm_results = self.vlm_client.compute(current_image, goal, image_index=image_index)
+            vlm_results = self.vlm_client.compute(pred_mask, goal, image_index=image_index)
             s_perceptual = vlm_results["vlm_score"]
             result["details"]["vlm"] = s_perceptual
             result["raw_metrics"]["vlm"] = vlm_results

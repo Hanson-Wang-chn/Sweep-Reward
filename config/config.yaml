@@ -15,6 +15,11 @@ system:
 # 目标：从含噪 RGB 图像中提取干净的乐高积木 Mask
 # ------------------------------------------------------------------------------
 preprocess:
+  # 是否对 current 图片应用形态学操作（开闭运算）
+  # true: 对 current 图片使用与 goal 相同的形态学预处理
+  # false: current 图片仅进行颜色分割，不使用形态学操作
+  preprocess_current: true
+
   # 颜色分割：红色通常跨越 HSV 的 0 度，需要两个区间
   color_segmentation:
     hsv_range_1:
@@ -28,7 +33,7 @@ preprocess:
   morphology:
     closing:
       kernel_size: 5        # 闭运算核大小 (推荐 5x5)
-      iterations: 2         # 执行次数，次数越多填补能力越强
+      iterations: 1         # 执行次数，次数越多填补能力越强
       kernel_shape: "ellipse" # 核形状: "rect", "cross", "ellipse"
     opening:
       kernel_size: 3        # 开运算核大小 (推荐 3x3)

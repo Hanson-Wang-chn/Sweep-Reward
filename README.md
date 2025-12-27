@@ -1,6 +1,6 @@
 # Sweep-Reward: 多模态集成评估模块
 
-**Version 1.3.1**
+**Version 1.4**
 
 ## 项目概述
 
@@ -225,6 +225,7 @@ system:
 
 ```yaml
 preprocess:
+  preprocess_current: false # 是否对 current 图片应用形态学操作
   color_segmentation:       # 红色 HSV 分割范围
     hsv_range_1:
       lower: [0, 100, 70]
@@ -240,6 +241,13 @@ preprocess:
       kernel_size: 3
       iterations: 1
 ```
+
+**preprocess_current 参数说明**：
+- `true`：对 current 图片应用与 goal 相同的形态学预处理（开闭运算）
+- `false`（默认）：current 图片仅进行颜色分割，不使用形态学操作
+
+注意：`generate_pseudo_label.py` 生成 goal 图像时始终会应用形态学操作，不受此参数影响。
+此外，goal 掩膜在评估阶段也会使用相同的形态学参数做开闭运算，VLM 输入直接使用这对预处理后的掩膜，确保同一张图片作为 goal 与 current 时送往 VLM 的左右两幅图一致。
 
 ### 评估指标权重
 
@@ -300,6 +308,13 @@ ensemble:
 4. **目标缓存**：`set_goal()` 会缓存目标的 DINOv2 嵌入，避免重复计算
 
 ## 更新日志
+
+### Version 1.4
+- **新增 preprocess_current 参数**：控制是否对 current 图片应用形态学操作
+  - 在 `config/config.yaml` 的 `preprocess` 部分设置 `preprocess_current: true/false`
+  - `true`：对 current 图片应用与 goal 相同的形态学预处理（开闭运算）
+  - `false`（默认）：current 图片仅进行颜色分割，不使用形态学操作
+  - `generate_pseudo_label.py` 始终应用形态学操作，不受此参数影响
 
 ### Version 1.3.1
 - **VLM 输入图片保存**：新增 `save_vlm_imgs` 调试选项

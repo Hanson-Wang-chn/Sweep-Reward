@@ -6,7 +6,7 @@ Generates goal images (binary masks) from real block photos.
 Functionality:
   - Takes a real photo of blocks and extracts a binary mask using the project's Preprocessor
   - Uses HSV color segmentation for red blocks
-  - Applies morphological operations (closing to fill gaps, opening to remove noise)
+  - Optionally applies morphological operations (closing to fill gaps, opening to remove noise)
   - Saves the result as a binary image (0/255)
 
 Command-line arguments:
@@ -15,13 +15,17 @@ Command-line arguments:
   - --output: Output path for single image mode
   - --output_dir: Output directory for batch mode
   - --config: Path to config file (defaults to config/config.yaml)
+  - --use-morphology: Enable morphological operations (default: False)
 
 Example usage:
-  # Single image
+  # Single image without morphology (default)
   python generate_pseudo_label.py --input data/end-0.png --output data/goal-0.png
 
-  # Batch processing
-  python generate_pseudo_label.py --input_dir data/raw --output_dir data/goals
+  # Single image with morphology
+  python generate_pseudo_label.py --input data/end-0.png --output data/goal-0.png --use-morphology
+
+  # Batch processing with morphology
+  python generate_pseudo_label.py --input_dir data/raw --output_dir data/goals --use-morphology
 """
 
 import argparse
@@ -58,6 +62,7 @@ def load_image(image_path: str) -> np.ndarray:
 def generate_pseudo_label(
     image: np.ndarray,
     preprocessor: Preprocessor,
+    use_morphology: bool = False,
 ) -> np.ndarray:
     """
     Generate pseudo-label (binary mask) from input image.
@@ -65,12 +70,14 @@ def generate_pseudo_label(
     Args:
         image: RGB image (H, W, 3), uint8.
         preprocessor: Preprocessor instance.
+        use_morphology: Whether to apply morphological operations.
 
     Returns:
         Binary mask (H, W), uint8, values 0 or 255.
     """
     # Process image to get binary mask
-    binary_mask, _ = preprocessor.process(image)
+    # force_morphology parameter controls whether to apply morphological operations
+    binary_mask, _ = preprocessor.process(image, force_morphology=use_morphology)
 
     # Convert 0/1 to 0/255 for saving
     binary_mask_255 = (binary_mask * 255).astype(np.uint8)
@@ -100,6 +107,7 @@ def process_single_image(
     input_path: str,
     output_path: str,
     preprocessor: Preprocessor,
+    use_morphology: bool = False,
 ) -> None:
     """
     Process a single image and save the pseudo-label.
@@ -108,13 +116,14 @@ def process_single_image(
         input_path: Path to input image.
         output_path: Path to save output binary mask.
         preprocessor: Preprocessor instance.
+        use_morphology: Whether to apply morphological operations.
     """
     # Load image
     image = load_image(input_path)
     print(f"Loaded image: {input_path}, shape: {image.shape}")
 
     # Generate pseudo-label
-    mask = generate_pseudo_label(image, preprocessor)
+    mask = generate_pseudo_label(image, preprocessor, use_morphology)
 
     # Save binary image
     save_binary_image(mask, output_path)
@@ -124,6 +133,7 @@ def process_directory(
     input_dir: str,
     output_dir: str,
     preprocessor: Preprocessor,
+    use_morphology: bool = False,
     extensions: tuple = (".png", ".jpg", ".jpeg"),
 ) -> None:
     """
@@ -133,6 +143,7 @@ def process_directory(
         input_dir: Input directory path.
         output_dir: Output directory path.
         preprocessor: Preprocessor instance.
+        use_morphology: Whether to apply morphological operations.
         extensions: Tuple of valid image file extensions.
     """
     # Get all image files
@@ -157,7 +168,7 @@ def process_directory(
         output_path = os.path.join(output_dir, output_filename)
 
         try:
-            process_single_image(input_path, output_path, preprocessor)
+            process_single_image(input_path, output_path, preprocessor, use_morphology)
         except Exception as e:
             print(f"Error processing {input_path}: {e}")
 
@@ -200,6 +211,13 @@ def main():
         help="Path to configuration file",
     )
 
+    # Morphology option
+    parser.add_argument(
+        "--use-morphology",
+        action="store_true",
+        help="Apply morphological operations (closing and opening) to the mask (default: False)",
+    )
+
     args = parser.parse_args()
 
     # Validate arguments
@@ -222,13 +240,19 @@ def main():
     preprocessor = Preprocessor(config)
     print("Preprocessor initialized")
 
+    # Display morphology setting
+    if args.use_morphology:
+        print("Morphological operations: ENABLED")
+    else:
+        print("Morphological operations: DISABLED (default)")
+
     # Process images
     if args.input:
         # Single image mode
-        process_single_image(args.input, args.output, preprocessor)
+        process_single_image(args.input, args.output, preprocessor, args.use_morphology)
     else:
         # Directory mode
-        process_directory(args.input_dir, args.output_dir, preprocessor)
+        process_directory(args.input_dir, args.output_dir, preprocessor, args.use_morphology)
 
     print("Done!")
 
