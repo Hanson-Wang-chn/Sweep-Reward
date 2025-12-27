@@ -97,6 +97,7 @@ class Evaluator:
         current_image: np.ndarray,
         goal_mask: np.ndarray = None,
         save_debug: bool = None,
+        image_index: int = 0,
     ) -> Dict[str, Any]:
         """
         Evaluate current state against goal.
@@ -106,6 +107,7 @@ class Evaluator:
             current_image: Current RGB image (H, W, 3), uint8.
             goal_mask: Goal mask (optional if already set via set_goal).
             save_debug: Whether to save debug outputs (overrides config).
+            image_index: Index for distinguishing multiple evaluations when saving VLM images.
 
         Returns:
             Dictionary containing:
@@ -178,7 +180,7 @@ class Evaluator:
 
         # Compute perceptual score (VLM)
         try:
-            vlm_results = self.vlm_client.compute(current_image, goal)
+            vlm_results = self.vlm_client.compute(current_image, goal, image_index=image_index)
             s_perceptual = vlm_results["vlm_score"]
             result["details"]["vlm"] = s_perceptual
             result["raw_metrics"]["vlm"] = vlm_results

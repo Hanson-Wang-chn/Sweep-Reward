@@ -1,6 +1,6 @@
 # Sweep-Reward: 多模态集成评估模块
 
-**Version 1.3**
+**Version 1.3.1**
 
 ## 项目概述
 
@@ -300,6 +300,13 @@ ensemble:
 4. **目标缓存**：`set_goal()` 会缓存目标的 DINOv2 嵌入，避免重复计算
 
 ## 更新日志
+
+### Version 1.3.1
+- **VLM 输入图片保存**：新增 `save_vlm_imgs` 调试选项
+  - 在 `config/config.yaml` 的 `debug` 部分设置 `save_vlm_imgs: true` 启用
+  - 启用后会将每次 VLM 调用时发送给 VLM 的图片保存到日志目录
+  - 多图片评估时，每张 current 图片的 VLM 输入会分别保存，文件名包含时间戳和图片索引
+  - 用于调试 VLM 的输入和输出
 
 ### Version 1.3
 - **多图片输入支持**：`--current` 参数现在支持多张图片或目录输入

@@ -158,3 +158,6 @@ debug:
   # 向后兼容的默认设置（当未指定模式时使用）
   enable_visualization: true
   save_metrics_to_json: true
+
+  # VLM 调试设置
+  save_vlm_imgs: true        # 是否保存 VLM 的输入图片（调试用）

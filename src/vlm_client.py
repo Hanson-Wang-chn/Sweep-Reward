@@ -8,6 +8,7 @@ import json
 import base64
 import time
 import logging
+from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 
 import numpy as np
@@ -47,6 +48,11 @@ class VLMClient:
 
         # System prompt
         self.system_prompt = vlm_cfg.get("system_prompt", self._default_system_prompt())
+
+        # Debug configuration
+        debug_cfg = config.get("debug", {})
+        self.save_vlm_imgs = debug_cfg.get("save_vlm_imgs", False)
+        self.vis_output_dir = debug_cfg.get("vis_output_dir", "./logs")
 
         # Color segmentation parameters (HSV ranges for red)
         preprocess_cfg = config.get("preprocess", {})
@@ -315,10 +321,32 @@ class VLMClient:
 
         return 0.5, "API call failed after all retries"
 
+    def _save_vlm_input_image(self, image: np.ndarray, image_index: int = 0) -> None:
+        """
+        Save VLM input image for debugging.
+
+        Args:
+            image: The comparison image sent to VLM (H, W, 3), uint8.
+            image_index: Index for distinguishing multiple VLM calls.
+        """
+        if not self.save_vlm_imgs:
+            return
+
+        os.makedirs(self.vis_output_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"vlm_input_{timestamp}_{image_index}.png"
+        filepath = os.path.join(self.vis_output_dir, filename)
+
+        # Convert RGB to BGR for cv2
+        image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(filepath, image_bgr)
+        logger.debug(f"Saved VLM input image to {filepath}")
+
     def compute(
         self,
         current_image: np.ndarray,
         goal_mask: np.ndarray,
+        image_index: int = 0,
     ) -> Dict[str, Any]:
         """
         Compute VLM perceptual score.
@@ -326,6 +354,7 @@ class VLMClient:
         Args:
             current_image: Current RGB image (H, W, 3), uint8.
             goal_mask: Binary goal mask (H, W), values 0/1.
+            image_index: Index for distinguishing multiple VLM calls when saving images.
 
         Returns:
             Dictionary containing:
@@ -334,6 +363,9 @@ class VLMClient:
         """
         # Create comparison image
         comparison = self.create_comparison_image(current_image, goal_mask)
+
+        # Save VLM input image if debugging is enabled
+        self._save_vlm_input_image(comparison, image_index)
 
         # Call API
         try:
