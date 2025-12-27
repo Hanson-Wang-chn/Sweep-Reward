@@ -78,11 +78,6 @@ metrics:
       layer: "cls"          # 提取特征层: "cls" 或 "patch" (本项目推荐 cls)
       resize_input: 224     # DINO 输入尺寸 (通常为 14 的倍数)
 
-      # 目标渲染：将二值化的 Goal Mask 渲染成 RGB 图以便 DINO 理解
-      goal_render:
-        foreground_color: [200, 0, 0] # 模拟乐高红 (RGB)
-        background_color: [200, 200, 200] # 模拟桌面灰白 (RGB)
-
   # --- D. 感知层 (Perceptual Layer) ---
   perceptual:
     vlm:

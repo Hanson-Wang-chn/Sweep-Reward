@@ -48,11 +48,15 @@ class VLMClient:
         # System prompt
         self.system_prompt = vlm_cfg.get("system_prompt", self._default_system_prompt())
 
-        # Goal rendering config (for creating comparison image)
-        semantic_cfg = config.get("metrics", {}).get("semantic", {}).get("dinov2", {})
-        render_cfg = semantic_cfg.get("goal_render", {})
-        self.fg_color = np.array(render_cfg.get("foreground_color", [200, 0, 0]))
-        self.bg_color = np.array(render_cfg.get("background_color", [200, 200, 200]))
+        # Color segmentation parameters (HSV ranges for red)
+        preprocess_cfg = config.get("preprocess", {})
+        color_seg = preprocess_cfg.get("color_segmentation", {})
+        hsv1 = color_seg.get("hsv_range_1", {})
+        hsv2 = color_seg.get("hsv_range_2", {})
+        self.hsv_lower_1 = np.array(hsv1.get("lower", [0, 100, 70]))
+        self.hsv_upper_1 = np.array(hsv1.get("upper", [10, 255, 255]))
+        self.hsv_lower_2 = np.array(hsv2.get("lower", [170, 100, 70]))
+        self.hsv_upper_2 = np.array(hsv2.get("upper", [180, 255, 255]))
 
     def _default_system_prompt(self) -> str:
         """Return default system prompt."""
@@ -70,21 +74,48 @@ class VLMClient:
             )
         return api_key
 
-    def render_goal_image(self, goal_mask: np.ndarray) -> np.ndarray:
+    def mask_to_binary_image(self, mask: np.ndarray) -> np.ndarray:
         """
-        Render binary goal mask as RGB image.
+        Convert binary mask to 3-channel black-white image.
 
         Args:
-            goal_mask: Binary goal mask (H, W), values 0/1.
+            mask: Binary mask (H, W), values 0/1.
 
         Returns:
-            RGB image (H, W, 3), uint8.
+            RGB image (H, W, 3), uint8, black (0) and white (255).
         """
-        h, w = goal_mask.shape
-        rendered = np.zeros((h, w, 3), dtype=np.uint8)
-        rendered[:, :] = self.bg_color
-        rendered[goal_mask > 0] = self.fg_color
-        return rendered
+        # Convert to 0-255 range
+        binary_255 = (mask * 255).astype(np.uint8)
+
+        # Create 3-channel image
+        binary_rgb = np.stack([binary_255, binary_255, binary_255], axis=-1)
+
+        return binary_rgb
+
+    def extract_mask_from_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Extract binary mask from RGB image using HSV color segmentation.
+
+        Args:
+            image: RGB image (H, W, 3), uint8.
+
+        Returns:
+            Binary mask (H, W), values 0/1.
+        """
+        # Convert RGB to HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+
+        # Create masks for both red ranges
+        mask1 = cv2.inRange(hsv, self.hsv_lower_1, self.hsv_upper_1)
+        mask2 = cv2.inRange(hsv, self.hsv_lower_2, self.hsv_upper_2)
+
+        # Combine masks
+        mask = cv2.bitwise_or(mask1, mask2)
+
+        # Convert to binary 0/1
+        binary_mask = (mask > 127).astype(np.uint8)
+
+        return binary_mask
 
     def create_comparison_image(
         self,
@@ -93,6 +124,7 @@ class VLMClient:
     ) -> np.ndarray:
         """
         Create side-by-side comparison image for VLM input.
+        Both images are binary (black-white).
 
         Args:
             current_image: Current RGB image (H, W, 3), uint8.
@@ -101,23 +133,27 @@ class VLMClient:
         Returns:
             Concatenated comparison image (H, 2W, 3), uint8.
         """
-        # Render goal mask
-        goal_image = self.render_goal_image(goal_mask)
+        # Extract mask from current image and convert to binary image
+        current_mask = self.extract_mask_from_image(current_image)
+        current_binary = self.mask_to_binary_image(current_mask)
+
+        # Convert goal mask to binary image
+        goal_image = self.mask_to_binary_image(goal_mask)
 
         # Ensure same size
-        h1, w1 = current_image.shape[:2]
+        h1, w1 = current_binary.shape[:2]
         h2, w2 = goal_image.shape[:2]
 
         if h1 != h2 or w1 != w2:
             goal_image = cv2.resize(goal_image, (w1, h1))
 
         # Add labels
-        current_labeled = current_image.copy()
+        current_labeled = current_binary.copy()
         goal_labeled = goal_image.copy()
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(current_labeled, "Current", (10, 25), font, 0.7, (255, 255, 255), 2)
-        cv2.putText(goal_labeled, "Goal", (10, 25), font, 0.7, (255, 255, 255), 2)
+        cv2.putText(current_labeled, "Current", (10, 25), font, 0.7, (128, 128, 128), 2)
+        cv2.putText(goal_labeled, "Goal", (10, 25), font, 0.7, (128, 128, 128), 2)
 
         # Concatenate horizontally
         comparison = np.concatenate([current_labeled, goal_labeled], axis=1)

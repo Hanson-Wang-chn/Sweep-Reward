@@ -98,13 +98,13 @@ def run_basic_evaluation(config, current_image, goal_mask, output_dir):
 
     # Save visualization outputs if enabled
     if config.get("debug", {}).get("enable_visualization", False):
-        # Save goal rendered image
+        # Save goal binary image
         from src.metrics.semantic import SemanticMetrics
         semantic_metrics = SemanticMetrics(config)
-        goal_rendered = semantic_metrics.render_goal_image(goal_processed)
+        goal_binary = semantic_metrics.mask_to_binary_image(goal_processed)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        goal_rendered_path = os.path.join(output_dir, f"goal_rendered_{timestamp}.png")
-        cv2.imwrite(goal_rendered_path, cv2.cvtColor(goal_rendered, cv2.COLOR_RGB2BGR))
+        goal_binary_path = os.path.join(output_dir, f"goal_binary_{timestamp}.png")
+        cv2.imwrite(goal_binary_path, cv2.cvtColor(goal_binary, cv2.COLOR_RGB2BGR))
     
     return result
 
@@ -281,14 +281,14 @@ def main():
         pred_mask, _ = preprocessor.process(current_resized)
         goal_processed = preprocessor.process_goal_mask(goal_mask)
 
-        # Save rendered goal image for DINO
+        # Save binary goal image for DINO
         if not args.basic_only:
             from src.metrics.semantic import SemanticMetrics
             semantic_metrics = SemanticMetrics(config)
-            goal_rendered = semantic_metrics.render_goal_image(goal_processed)
-            goal_rendered_path = os.path.join(args.output, "goal_rendered_final.png")
-            cv2.imwrite(goal_rendered_path, cv2.cvtColor(goal_rendered, cv2.COLOR_RGB2BGR))
-            logger.info(f"Rendered goal image saved to: {goal_rendered_path}")
+            goal_binary = semantic_metrics.mask_to_binary_image(goal_processed)
+            goal_binary_path = os.path.join(args.output, "goal_binary_final.png")
+            cv2.imwrite(goal_binary_path, cv2.cvtColor(goal_binary, cv2.COLOR_RGB2BGR))
+            logger.info(f"Binary goal image saved to: {goal_binary_path}")
 
         # Create evaluation visualization
         vis_path = os.path.join(args.output, "evaluation_result.png")

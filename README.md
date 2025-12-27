@@ -1,6 +1,6 @@
 # Sweep-Reward: 多模态集成评估模块
 
-**Version 1.1**
+**Version 1.2**
 
 ## 项目概述
 
@@ -14,8 +14,8 @@
 - **形态学处理**：闭运算填补空隙，开运算去除噪点
 - **几何层评估**：Elastic IoU 和 F1-Score
 - **轮廓层评估**：双向 Chamfer Distance
-- **语义层评估**：DINOv2 嵌入相似度
-- **感知层评估**：VLM (GPT-4o) Chain-of-Thought 评分
+- **语义层评估**：DINOv2 嵌入相似度（使用二值图像输入）
+- **感知层评估**：VLM (GPT-4o) Chain-of-Thought 评分（使用二值图像输入）
 - **加权门控机制**：节省计算资源，低分时跳过高成本模块
 
 ## 目录结构
@@ -52,7 +52,7 @@ Sweep-Reward/
 
 ### 环境要求
 
-- Python >= 3.8
+- Python >= 3.11
 - CUDA（推荐，用于 DINOv2 加速）
 
 ### 安装依赖
@@ -275,6 +275,23 @@ ensemble:
 2. **GPU 内存**：DINOv2 ViT-Large 模型需要约 3GB 显存
 3. **API 费用**：VLM 评估会产生 OpenRouter API 费用，可使用 `--skip-vlm` 跳过
 4. **目标缓存**：`set_goal()` 会缓存目标的 DINOv2 嵌入，避免重复计算
+
+## 更新日志
+
+### Version 1.2
+- **移除渲染功能**：DINO 和 VLM 的输入改为黑白二值图像（224x224），不再渲染为彩色图像
+- **简化配置**：移除 `config.yaml` 中的 `goal_render` 配置项（foreground_color、background_color）
+- **代码优化**：
+  - `src/metrics/semantic.py`：使用 `mask_to_binary_image()` 替代 `render_goal_image()`
+  - `src/vlm_client.py`：VLM 比较图像改为二值图像对比
+  - `src/evaluator.py`：移除渲染图像的保存
+
+### Version 1.1
+- 添加伪标签生成模块 `generate_pseudo_label.py`
+- 添加渲染可视化功能
+
+### Version 1.0
+- 初始版本
 
 ## 许可证
 

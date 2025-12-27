@@ -33,10 +33,6 @@ class SemanticMetrics:
         self.layer = semantic_cfg.get("layer", "cls")
         self.resize_input = semantic_cfg.get("resize_input", 224)
 
-        # Goal rendering parameters
-        render_cfg = semantic_cfg.get("goal_render", {})
-        self.fg_color = np.array(render_cfg.get("foreground_color", [200, 0, 0]))
-        self.bg_color = np.array(render_cfg.get("background_color", [200, 200, 200]))
 
         # Device
         system_cfg = config.get("system", {})
@@ -70,27 +66,23 @@ class SemanticMetrics:
             self._model.eval()
         return self._model
 
-    def render_goal_image(self, goal_mask: np.ndarray) -> np.ndarray:
+    def mask_to_binary_image(self, mask: np.ndarray) -> np.ndarray:
         """
-        Render binary goal mask as RGB image for DINOv2 processing.
-        Creates a colored image that approximates the real Lego appearance.
+        Convert binary mask to 3-channel black-white image for DINOv2 processing.
 
         Args:
-            goal_mask: Binary goal mask (H, W), values 0/1.
+            mask: Binary mask (H, W), values 0/1.
 
         Returns:
-            RGB image (H, W, 3), uint8.
+            RGB image (H, W, 3), uint8, black (0) and white (255).
         """
-        h, w = goal_mask.shape
-        rendered = np.zeros((h, w, 3), dtype=np.uint8)
+        # Convert to 0-255 range
+        binary_255 = (mask * 255).astype(np.uint8)
 
-        # Set background color
-        rendered[:, :] = self.bg_color
+        # Create 3-channel image
+        binary_rgb = np.stack([binary_255, binary_255, binary_255], axis=-1)
 
-        # Set foreground color where mask is 1
-        rendered[goal_mask > 0] = self.fg_color
-
-        return rendered
+        return binary_rgb
 
     def extract_mask_from_image(self, image: np.ndarray) -> np.ndarray:
         """
@@ -118,24 +110,24 @@ class SemanticMetrics:
 
         return binary_mask
 
-    def render_current_image(self, current_image: np.ndarray) -> np.ndarray:
+    def get_binary_image_from_current(self, current_image: np.ndarray) -> np.ndarray:
         """
-        Extract mask from current image and render it using the same method as goal.
-        This ensures DINO compares two images rendered in the same way.
+        Extract mask from current image and convert to binary image.
+        This ensures DINO compares two binary images in the same format.
 
         Args:
             current_image: RGB image (H, W, 3), uint8.
 
         Returns:
-            Rendered RGB image (H, W, 3), uint8.
+            Binary RGB image (H, W, 3), uint8, black (0) and white (255).
         """
         # Extract mask using color segmentation only (no morphological operations)
         mask = self.extract_mask_from_image(current_image)
 
-        # Render the mask using the same method as goal
-        rendered = self.render_goal_image(mask)
+        # Convert mask to binary image
+        binary_image = self.mask_to_binary_image(mask)
 
-        return rendered
+        return binary_image
 
     def preprocess_image(self, image: np.ndarray) -> torch.Tensor:
         """
@@ -238,8 +230,8 @@ class SemanticMetrics:
         Returns:
             Goal embedding tensor.
         """
-        # Render goal mask as RGB
-        goal_image = self.render_goal_image(goal_mask)
+        # Convert goal mask to binary image (black-white)
+        goal_image = self.mask_to_binary_image(goal_mask)
 
         # Extract and cache embedding
         self._cached_goal_embedding = self.extract_embedding(goal_image)
@@ -276,12 +268,12 @@ class SemanticMetrics:
                 "Goal mask must be provided if no cached embedding exists"
             )
 
-        # Render current image using the same method as goal
-        # (extract mask via color segmentation, then render)
-        rendered_current = self.render_current_image(current_image)
+        # Get binary image from current image
+        # (extract mask via color segmentation, then convert to binary image)
+        binary_current = self.get_binary_image_from_current(current_image)
 
-        # Extract rendered current image embedding
-        current_embedding = self.extract_embedding(rendered_current)
+        # Extract binary current image embedding
+        current_embedding = self.extract_embedding(binary_current)
 
         # Compute similarity
         cosine_sim = self.compute_cosine_similarity(current_embedding, goal_embedding)
