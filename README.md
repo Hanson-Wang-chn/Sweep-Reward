@@ -1,5 +1,7 @@
 # Sweep-Reward: 多模态集成评估模块
 
+**Version 1.1**
+
 ## 项目概述
 
 本项目是 **Sweep to Shapes** 任务的评估模块，用于评估双臂机器人将乐高积木扫成指定字母形状（如 "Z"、"E"、"N"）的任务完成质量。
@@ -41,6 +43,7 @@ Sweep-Reward/
 ├── logs/
 │   └── vis_eval/            # 可视化输出目录
 ├── main.py                  # 测试脚本
+├── generate_pseudo_label.py # 伪标签生成工具
 ├── requirements.txt         # 依赖列表
 └── README.md               # 本文件
 ```
@@ -115,6 +118,27 @@ python main.py \
     --visualize \
     --basic-only
 ```
+
+### 生成伪标签（Goal 图像）
+
+使用 `generate_pseudo_label.py` 从真实乐高照片生成二值化目标图像（伪标签）：
+
+```bash
+# 单张图片处理
+python generate_pseudo_label.py --input data/end-0.png --output data/goal-0.png
+
+# 批量处理目录
+python generate_pseudo_label.py --input_dir data/raw --output_dir data/goals
+
+# 指定配置文件
+python generate_pseudo_label.py --input data/photo.png --config config/config.yaml
+```
+
+**功能说明**：
+- 从真实乐高照片中提取红色积木区域
+- 使用 HSV 颜色分割识别红色乐高
+- 应用形态学操作（闭运算填补空隙、开运算去除噪点）
+- 输出二值化图像（0/255），可直接作为评估模块的目标图像
 
 ### 作为 Python 模块使用
 

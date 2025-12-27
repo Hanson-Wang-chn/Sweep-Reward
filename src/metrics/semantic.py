@@ -3,6 +3,7 @@ Semantic metrics using DINOv2 embeddings.
 Evaluates high-level visual similarity between shapes.
 """
 
+import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -42,6 +43,16 @@ class SemanticMetrics:
         device_str = system_cfg.get("device", "cuda")
         self.device = torch.device(device_str if torch.cuda.is_available() else "cpu")
 
+        # Color segmentation parameters (HSV ranges for red)
+        preprocess_cfg = config.get("preprocess", {})
+        color_seg = preprocess_cfg.get("color_segmentation", {})
+        hsv1 = color_seg.get("hsv_range_1", {})
+        hsv2 = color_seg.get("hsv_range_2", {})
+        self.hsv_lower_1 = np.array(hsv1.get("lower", [0, 100, 70]))
+        self.hsv_upper_1 = np.array(hsv1.get("upper", [10, 255, 255]))
+        self.hsv_lower_2 = np.array(hsv2.get("lower", [170, 100, 70]))
+        self.hsv_upper_2 = np.array(hsv2.get("upper", [180, 255, 255]))
+
         # Model (lazy loading)
         self._model = None
 
@@ -78,6 +89,51 @@ class SemanticMetrics:
 
         # Set foreground color where mask is 1
         rendered[goal_mask > 0] = self.fg_color
+
+        return rendered
+
+    def extract_mask_from_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Extract binary mask from RGB image using HSV color segmentation.
+        NOTE: No morphological operations (closing/opening) are applied here.
+
+        Args:
+            image: RGB image (H, W, 3), uint8.
+
+        Returns:
+            Binary mask (H, W), values 0/1.
+        """
+        # Convert RGB to HSV
+        hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+
+        # Create masks for both red ranges
+        mask1 = cv2.inRange(hsv, self.hsv_lower_1, self.hsv_upper_1)
+        mask2 = cv2.inRange(hsv, self.hsv_lower_2, self.hsv_upper_2)
+
+        # Combine masks
+        mask = cv2.bitwise_or(mask1, mask2)
+
+        # Convert to binary 0/1
+        binary_mask = (mask > 127).astype(np.uint8)
+
+        return binary_mask
+
+    def render_current_image(self, current_image: np.ndarray) -> np.ndarray:
+        """
+        Extract mask from current image and render it using the same method as goal.
+        This ensures DINO compares two images rendered in the same way.
+
+        Args:
+            current_image: RGB image (H, W, 3), uint8.
+
+        Returns:
+            Rendered RGB image (H, W, 3), uint8.
+        """
+        # Extract mask using color segmentation only (no morphological operations)
+        mask = self.extract_mask_from_image(current_image)
+
+        # Render the mask using the same method as goal
+        rendered = self.render_goal_image(mask)
 
         return rendered
 
@@ -220,8 +276,12 @@ class SemanticMetrics:
                 "Goal mask must be provided if no cached embedding exists"
             )
 
-        # Extract current image embedding
-        current_embedding = self.extract_embedding(current_image)
+        # Render current image using the same method as goal
+        # (extract mask via color segmentation, then render)
+        rendered_current = self.render_current_image(current_image)
+
+        # Extract rendered current image embedding
+        current_embedding = self.extract_embedding(rendered_current)
 
         # Compute similarity
         cosine_sim = self.compute_cosine_similarity(current_embedding, goal_embedding)
