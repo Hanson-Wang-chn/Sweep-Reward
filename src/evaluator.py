@@ -242,6 +242,12 @@ class Evaluator:
             if self._goal_mask is not None:
                 goal_path = os.path.join(self.vis_output_dir, f"goal_mask_{timestamp}.png")
                 cv2.imwrite(goal_path, (self._goal_mask * 255).astype(np.uint8))
+                
+                # Save rendered goal image (DINO input)
+                goal_rendered = self.semantic_metrics.render_goal_image(self._goal_mask)
+                goal_rendered_path = os.path.join(self.vis_output_dir, f"goal_rendered_{timestamp}.png")
+                cv2.imwrite(goal_rendered_path, cv2.cvtColor(goal_rendered, cv2.COLOR_RGB2BGR))
+                logger.info(f"Saved rendered goal image to: {goal_rendered_path}")
 
     def _make_serializable(self, obj: Any) -> Any:
         """Convert numpy types to Python native types for JSON serialization."""
