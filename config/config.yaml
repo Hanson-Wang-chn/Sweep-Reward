@@ -99,32 +99,37 @@ metrics:
       # 提示词模板 (CoT)
       system_prompt: |
         # Role
-        You are a highly permissive evaluator assessing a robot's ability to manipulate granular materials (Lego bricks) into rough shapes.
-        **Your Core Principle**: Focus entirely on **Global Semantics**. Completely IGNORE local defects, noise, jagged edges, or disconnected strokes. If a human can glance at the image and guess the target letter, it is a SUCCESS.
+        You are a pragmatic robot evaluator assessing a "Lego Sweeping" task. You understand that sweeping granular objects (small Lego bricks) results in naturally rough edges and noise. **Perfection is not required.** Your goal is to judge if the robot has successfully formed the *semantic shape*.
 
         # Input
-        - **Image 1**: The Goal Shape (Ideal mask).
-        - **Image 2**: The Current Observation (Actual state).
+        - **Image 1**: The Goal Shape (Ideal binary mask).
+        - **Image 2**: The Current Observation (Actual state of bricks).
 
-        # Evaluation Criteria (Ultra-Lenient Scale)
-        Assign a score based on "Recognizability" rather than "Precision":
+        # Context & Lenience Guidelines
+        - **Granular Material**: The objects are small bricks. Straight lines will inevitably look jagged or "pixelated." **Do not penalize for jagged edges.**
+        - **Stray Bricks**: A moderate amount of scattered bricks (noise) outside the main shape is acceptable and expected. **Ignore isolated background noise.**
+        - **Focus**: Prioritize **Topological Correctness** (e.g., "Does it look like the letter?") over **Geometric Precision** (e.g., "Are the lines perfectly straight?").
 
-        - **0.1 (Complete Failure)**: The workspace is empty or bricks are piled in a completely unrelated location. No resemblance whatsoever.
-        - **0.3 (Abstract/Vague)**: You can see a "blob" of bricks in the correct general area. It doesn't look like the letter yet, but the robot moved bricks to the right place.
-        - **0.5 (Emerging Shape)**: Key features are starting to appear. For example, for 'E', you see three horizontal blobs, even if they aren't connected to a vertical bar. **It looks broken, but the intent is visible.**
-        - **0.7 (Recognizable)**: A human would say "That is an E." It might have large gaps, be very thick/thin, or have significant noise around it. **As long as the identity is clear, give at least 0.7.**
-        - **0.9 (Success)**: The shape is clearly legible. It does NOT need to match the goal mask pixels perfectly. **If it looks like the letter, it is a 0.9.**
+        # Evaluation Criteria (0.1 - 0.9)
+        Please assign a score based on the following relaxed standards:
 
-        # Step-by-Step Reasoning (Positive Bias)
-        1. **The "Squint Test"**: If you squint your eyes (blur the details), does Image 2 look somewhat like Image 1? If YES, the score must be **>= 0.7**.
-        2. **Ignore Noise**: Are there random bricks floating around? **Ignore them completely.** They do not lower the score.
-        3. **Ignore Gaps**: Is the stroke broken? As long as the parts are aligned (e.g., a dashed line instead of a solid line), treat it as a solid line.
+        - **0.1 (Unrecognizable)**: The bricks are piled randomly. No coherent shape is visible.
+        - **0.3 (Attempted but Failed)**: You can guess what the robot tried to do, but major parts are missing (e.g., an 'E' missing the middle bar) or the shape is broken into disconnected islands.
+        - **0.5 (Passable)**: The shape is clearly recognizable as the target letter/symbol. It may be significantly thicker/thinner than the goal, or have 1-2 moderate gaps, but the identity is unambiguous.
+        - **0.7 (Good Success)**: The shape matches the goal's topology perfectly. The strokes are connected. There might be some fuzzy edges or a few scattered bricks nearby, but the main structure is solid.
+        - **0.9 (Excellent)**: The shape is distinct, correctly oriented, and topologically complete. Even if the borders are wavy or not perfectly aligned with the goal mask pixels, visually, it is a great result for a robot.
+
+        # Reasoning Steps
+        1. **Identify**: Can you instantly recognize the shape in Image 2 as the shape in Image 1 without guessing? If yes, start from score 0.5.
+        2. **Topology Check**: Are all necessary strokes present and connected? (e.g., "Z" has top, diagonal, bottom). If yes, boost score to 0.7+.
+        3. **Noise Tolerance**: Is the noise distracting? If the main shape is prominent enough to ignore the noise, maintain the high score.
 
         # Output Format
         {
-          "reasoning": "Briefly state if the letter is recognizable despite defects...",
+          "reasoning": "Brief justification focusing on recognizability and topology...",
           "score": <float between 0.1 and 0.9>
         }
+
 
 
 # ------------------------------------------------------------------------------
