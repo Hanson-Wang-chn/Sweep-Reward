@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class VLMClient:
     """
     VLM Client for perceptual scoring using OpenRouter API.
-    Uses GPT-4o with CoT prompting to evaluate shape matching quality.
+    Uses VLM with CoT prompting to evaluate shape matching quality.
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -60,10 +60,32 @@ class VLMClient:
 
     def _default_system_prompt(self) -> str:
         """Return default system prompt."""
-        return """You are a strict robot manipulation judge evaluating a Lego sweeping task.
-1. Compare the current pile of Legos with the goal shape.
-2. Analyze geometric alignment, disconnected parts, and scattered debris. i.e. Identify specific defects: Are there disconnected parts? Is the shape too thin? Is there extra debris outside?
-3. Output a final score from 0.0 to 1.0 in JSON format: {"reasoning": "...", "score": 0.0}."""
+        return """# Role
+        You are a pragmatic robot evaluator assessing a "Lego Sweeping" task. You understand that sweeping granular objects (small Lego bricks) results in naturally rough edges and noise. **Perfection is not required.** Your goal is to judge if the robot has successfully formed the *semantic shape*.
+        # Input
+        - **Image 1**: The Goal Shape (Ideal binary mask).
+        - **Image 2**: The Current Observation (Actual state of bricks).
+        All images are black-and-white masks. White pixels represent LEGO bricks filled material. Black pixels represent empty space.
+        # Context & Lenience Guidelines
+        - **Granular Material**: The objects are small bricks. Straight lines will inevitably look jagged or "pixelated." **Do not penalize for jagged edges.**
+        - **Stray Bricks**: A moderate amount of scattered bricks (noise) outside the main shape is acceptable and expected. **Ignore isolated background noise.**
+        - **Focus**: Prioritize **Topological Correctness** (e.g., "Does it look like the letter?") over **Geometric Precision** (e.g., "Are the lines perfectly straight?").
+        # Evaluation Criteria (0.1 - 0.9)
+        Please assign a score based on the following relaxed standards:
+        - **0.1 (Unrecognizable)**: The bricks are piled randomly. No coherent shape is visible.
+        - **0.3 (Attempted but Failed)**: You can guess what the robot tried to do, but major parts are missing (e.g., an 'E' missing the middle bar) or the shape is broken into disconnected islands.
+        - **0.5 (Passable)**: The shape is clearly recognizable as the target letter/symbol. It may be significantly thicker/thinner than the goal, or have 1-2 moderate gaps, but the identity is unambiguous.
+        - **0.7 (Good Success)**: The shape matches the goal's topology perfectly. The strokes are connected. There might be some fuzzy edges or a few scattered bricks nearby, but the main structure is solid.
+        - **0.9 (Excellent)**: The shape is distinct, correctly oriented, and topologically complete. Even if the borders are wavy or not perfectly aligned with the goal mask pixels, visually, it is a great result for a robot.
+        # Reasoning Steps
+        1. **Identify**: Can you instantly recognize the shape in Image 2 as the shape in Image 1 without guessing? If yes, start from score 0.5.
+        2. **Topology Check**: Are all necessary strokes present and connected? (e.g., "Z" has top, diagonal, bottom). If yes, boost score to 0.7+.
+        3. **Noise Tolerance**: Is the noise distracting? If the main shape is prominent enough to ignore the noise, maintain the high score.
+        # Output Format
+        {
+          "reasoning": "Brief justification focusing on recognizability and topology...",
+          "score": <float between 0.1 and 0.9>
+        }"""
 
     def _get_api_key(self) -> str:
         """Get API key from environment variable."""

@@ -1,6 +1,6 @@
 # Sweep-Reward: 多模态集成评估模块
 
-**Version 1.2**
+**Version 1.3**
 
 ## 项目概述
 
@@ -85,8 +85,17 @@ export OPENROUTER_API_KEY="your-api-key-here"
 # 基础运行（使用默认示例图片）
 python main.py
 
-# 指定输入图片
+# 指定单张输入图片
 python main.py --current path/to/current.png --goal path/to/goal.png
+
+# 指定多张输入图片
+python main.py --current img1.png img2.png img3.png --goal path/to/goal.png
+
+# 指定图片目录（批量处理）
+python main.py --current path/to/image_dir/ --goal path/to/goal.png
+
+# 混合输入（多张图片 + 目录）
+python main.py --current img1.png path/to/dir/ img2.png --goal path/to/goal.png
 
 # 启用可视化输出
 python main.py --visualize
@@ -103,12 +112,22 @@ python main.py --basic-only --visualize
 # 指定配置文件
 python main.py --config config/config.yaml
 
+# 设置并发 VLM 调用的最大线程数（默认为 4）
+python main.py --current path/to/dir/ --goal goal.png --max-workers 8
+
 # 完整示例（包含所有模块）
 python main.py \
     --current example/example_current.png \
     --goal example/example_goal.png \
     --output ./logs/vis_eval \
     --visualize
+
+# 批量评估示例
+python main.py \
+    --current data/batch_images/ \
+    --goal example/example_goal.png \
+    --output ./logs/batch_eval \
+    --max-workers 4
 
 # 快速测试示例（仅基础指标）
 python main.py \
@@ -177,12 +196,16 @@ print(f"是否通过门控: {result['gating_passed']}")
 ### 批量评估
 
 ```python
-# 批量评估多张图片
+# 方式一：使用 evaluate_batch 方法
 images = [load_image(path) for path in image_paths]
 results = evaluator.evaluate_batch(images, goal_mask)
 
 for i, result in enumerate(results):
     print(f"Image {i}: score = {result['total_score']:.4f}")
+
+# 方式二：命令行批量评估（推荐，支持并发 VLM 调用）
+# python main.py --current img1.png img2.png img3.png --goal goal.png
+# python main.py --current path/to/image_dir/ --goal goal.png --max-workers 4
 ```
 
 ## 配置说明
@@ -277,6 +300,21 @@ ensemble:
 4. **目标缓存**：`set_goal()` 会缓存目标的 DINOv2 嵌入，避免重复计算
 
 ## 更新日志
+
+### Version 1.3
+- **多图片输入支持**：`--current` 参数现在支持多张图片或目录输入
+  - 可以指定多张图片：`--current img1.png img2.png img3.png`
+  - 可以指定目录：`--current path/to/image_dir/`
+  - 可以混合使用：`--current img1.png path/to/dir/ img2.png`
+- **并发 VLM 调用**：多图片模式下使用多线程并发调用 VLM API，大幅提升批量评估效率
+  - 新增 `--max-workers` 参数控制并发线程数（默认为 4）
+  - DINO 目标嵌入只计算一次，复用于所有图片的对比
+- **分离单/多图片配置**：在 `config.yaml` 中区分单张图片和多张图片模式的调试设置
+  - `debug.single_image`: 单张图片模式的可视化和 JSON 保存设置
+  - `debug.multi_image`: 批量模式的可视化和 JSON 保存设置（默认关闭可视化以提高效率）
+- **汇总输出**：批量评估结果汇总输出到终端和 JSON 文件
+  - 终端显示：每张图片的分数和统计摘要（均值、最大、最小、标准差）
+  - JSON 输出：`batch_results_<timestamp>.json` 包含完整的评估结果和统计信息
 
 ### Version 1.2
 - **移除渲染功能**：DINO 和 VLM 的输入改为黑白二值图像（224x224），不再渲染为彩色图像

@@ -81,7 +81,7 @@ metrics:
   # --- D. 感知层 (Perceptual Layer) ---
   perceptual:
     vlm:
-      model_name: "openai/gpt-4o"
+      model_name: "google/gemini-3-pro-preview"
       api_key_env_var: "OPENROUTER_API_KEY" # 环境变量名，不要直接写 Key
       base_url: "https://openrouter.ai/api/v1"
 
@@ -89,14 +89,38 @@ metrics:
       temperature: 0.0      # 低温度保证评分稳定性
       max_tokens: 1024
       timeout: 30           # 请求超时时间 (秒)
-      max_retries: 5        # 失败重试次数
+      max_retries: 5        # 失败重试次数 All images are black-and-white masks. White pixels represent LEGO bricks filled material. Black pixels represent empty space.
 
       # 提示词模板 (CoT)
       system_prompt: |
-        You are a strict robot manipulation judge evaluating a Lego sweeping task.
-        1. Compare the current pile of Legos with the goal shape.
-        2. Analyze geometric alignment, disconnected parts, and scattered debris. i.e. Identify specific defects: Are there disconnected parts? Is the shape too thin? Is there extra debris outside?
-        3. Output a final score from 0.0 to 1.0 in JSON format: {"reasoning": "...", "score": 0.0}.
+        # Role
+        You are a highly permissive evaluator assessing a robot's ability to manipulate granular materials (Lego bricks) into rough shapes.
+        **Your Core Principle**: Focus entirely on **Global Semantics**. Completely IGNORE local defects, noise, jagged edges, or disconnected strokes. If a human can glance at the image and guess the target letter, it is a SUCCESS.
+
+        # Input
+        - **Image 1**: The Goal Shape (Ideal mask).
+        - **Image 2**: The Current Observation (Actual state).
+
+        # Evaluation Criteria (Ultra-Lenient Scale)
+        Assign a score based on "Recognizability" rather than "Precision":
+
+        - **0.1 (Complete Failure)**: The workspace is empty or bricks are piled in a completely unrelated location. No resemblance whatsoever.
+        - **0.3 (Abstract/Vague)**: You can see a "blob" of bricks in the correct general area. It doesn't look like the letter yet, but the robot moved bricks to the right place.
+        - **0.5 (Emerging Shape)**: Key features are starting to appear. For example, for 'E', you see three horizontal blobs, even if they aren't connected to a vertical bar. **It looks broken, but the intent is visible.**
+        - **0.7 (Recognizable)**: A human would say "That is an E." It might have large gaps, be very thick/thin, or have significant noise around it. **As long as the identity is clear, give at least 0.7.**
+        - **0.9 (Success)**: The shape is clearly legible. It does NOT need to match the goal mask pixels perfectly. **If it looks like the letter, it is a 0.9.**
+
+        # Step-by-Step Reasoning (Positive Bias)
+        1. **The "Squint Test"**: If you squint your eyes (blur the details), does Image 2 look somewhat like Image 1? If YES, the score must be **>= 0.7**.
+        2. **Ignore Noise**: Are there random bricks floating around? **Ignore them completely.** They do not lower the score.
+        3. **Ignore Gaps**: Is the stroke broken? As long as the parts are aligned (e.g., a dashed line instead of a solid line), treat it as a solid line.
+
+        # Output Format
+        {
+          "reasoning": "Briefly state if the letter is recognizable despite defects...",
+          "score": <float between 0.1 and 0.9>
+        }
+
 
 # ------------------------------------------------------------------------------
 # 4. 集成机制 (Ensemble Mechanism)
@@ -118,7 +142,19 @@ ensemble:
 # 5. 调试与日志 (Debugging & Logging)
 # ------------------------------------------------------------------------------
 debug:
-  enable_visualization: true  # 是否保存处理过程中的图片 (Mask, Edges, Heatmaps)
-  vis_output_dir: "./logs/vis_eval"
+  # 单张图片模式设置
+  single_image:
+    enable_visualization: true  # 是否保存处理过程中的图片 (Mask, Edges, Heatmaps)
+    save_metrics_to_json: true  # 将每次评估的详细指标保存为 JSON
+
+  # 多张图片/批量模式设置
+  multi_image:
+    enable_visualization: false # 批量模式下通常关闭可视化以提高效率
+    save_metrics_to_json: true  # 保存汇总的 JSON 结果
+
+  vis_output_dir: "./logs"
   log_level: "INFO"           # "DEBUG", "INFO", "WARNING", "ERROR"
-  save_metrics_to_json: true  # 将每次评估的详细指标保存为 JSON
+
+  # 向后兼容的默认设置（当未指定模式时使用）
+  enable_visualization: true
+  save_metrics_to_json: true
