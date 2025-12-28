@@ -76,6 +76,24 @@ $$
 S_{geo} = 2 \cdot \frac{\text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall} + \epsilon}
 $$
 
+**3. Sinkhorn Divergence (EMD 近似)**
+在几何层加入基于熵正则的地球移动距离，衡量两个二值分布之间的运输代价。
+1. 将掩膜下采样为概率分布 $a, b$。
+2. 构造像素网格坐标 $X$，计算代价矩阵 $C = ||X_i - X_j||_2$。
+3. 使用 Sinkhorn-Knopp 迭代求解：
+$$
+\mathcal{W}_\varepsilon(a, b) = \min_{\pi \in \Pi(a, b)} \langle \pi, C \rangle + \varepsilon \mathrm{KL}(\pi)
+$$
+4. Sinkhorn Divergence:
+$$
+D_{\text{sink}}(a, b) = \mathcal{W}_\varepsilon(a, b) - \tfrac{1}{2}\mathcal{W}_\varepsilon(a, a) - \tfrac{1}{2}\mathcal{W}_\varepsilon(b, b)
+$$
+5. 映射到相似度：
+$$
+S_{\text{sink}} = \exp(-\lambda \cdot D_{\text{sink}})
+$$
+其中 $\lambda$ 由配置文件 `normalization_lambda` 控制。
+
 #### 2.2.2 轮廓层 (Contour Layer)
 
 **双向 Chamfer Distance (倒角距离)**
@@ -98,18 +116,32 @@ $$
 **DINOv2 Embedding Similarity**
 利用 DINOv2 对物体几何结构的敏感性，评估高层视觉相似度。
 
-*   **输入准备**：
-    *   $I_{curr}$: 原始 RGB 图像。
-    *   $I_{goal\_render}$: 将 $M_{goal}$ 渲染为与 $I_{curr}$ 风格近似的图像（红色色块 + 浅色背景）。
+*   **输入**：
+    *   $M_{pred}$: 当前观测图像的二值预测掩膜。
+    *   $M_{goal}$: 二值化目标图像
 *   **模型**：`dinov2_vitl14` (ViT-Large)。
 *   **计算**：
     $$
-    v_{curr} = \text{DINOv2}(I_{curr})_{[CLS]}, \quad v_{goal} = \text{DINOv2}(I_{goal\_render})_{[CLS]}
-    $$
-    $$
-    S_{semantic} = \frac{v_{curr} \cdot v_{goal}}{||v_{curr}||_2 \cdot ||v_{goal}||_2} \quad (\text{Cosine Similarity})
-    $$
-    *注意：需将余弦相似度 [-1, 1] 归一化至 [0, 1]。*
+    v_{curr} = \text{DINOv2}(M_{pred})_{[CLS]}, \quad v_{goal} = \text{DINOv2}(M_{goal})_{[CLS]}
+$$
+$$
+S_{semantic} = \frac{v_{curr} \cdot v_{goal}}{||v_{curr}||_2 \cdot ||v_{goal}||_2} \quad (\text{Cosine Similarity})
+$$
+*注意：需将余弦相似度 [-1, 1] 归一化至 [0, 1]。*
+
+**LPIPS (Learned Perceptual Image Patch Similarity)**
+在二值图上计算感知距离，距离越小相似度越高。
+$$
+S_{\text{LPIPS}} = \exp(-\lambda_{\text{lpips}} \cdot d_{\text{LPIPS}})
+$$
+其中 $d_{\text{LPIPS}}$ 由预训练感知网络给出，$\lambda_{\text{lpips}}$ 为配置系数。
+
+**DISTS (Deep Image Structure and Texture Similarity)**
+同时关注结构与纹理信息，适合二值图的整体形态对齐。
+$$
+S_{\text{DISTS}} = \exp(-\lambda_{\text{dists}} \cdot d_{\text{DISTS}})
+$$
+同样对距离取指数映射以得到 $[0, 1]$ 相似度。
 
 #### 2.2.4 感知层 (Perceptual Layer)
 
@@ -117,7 +149,8 @@ $$
 处理边缘情况（如断裂、堆叠过高），充当最终裁判。
 
 *   **API**：OpenRouter (调用 GPT-4o 等)。
-*   **输入**：拼接图像 (Current Image | Goal Image)。
+*   **输入**：拼接图像 (Binary Current Image |
+Binary Goal Image)。
 *   **Prompt 策略 (CoT)**：
     1.  **观察**：描述当前积木堆与目标的差异（断点、多余积木、形状畸变）。
     2.  **推理**：分析这些缺陷是否严重影响字母的可读性。
@@ -141,6 +174,7 @@ $$
     S_{final} = w_1 \cdot S_{geo} + w_2 \cdot S_{contour} + w_3 \cdot S_{semantic} + w_4 \cdot S_{perc}
     $$
     其中 $\sum w_i = 1$。
+    实现中对每个细分指标单独配置权重，权重设为 0 时会跳过该指标计算以节约算力。
 
 ---
 
@@ -166,7 +200,7 @@ Sweep-Reward/
 └── requirements.txt
 ```
 
-### 3.2 配置文件规范 (`config/config.yaml`)
+### 3.2 配置文件示例 (`config/config.yaml`)
 所有硬编码参数必须移至配置文件。
 
 ```yaml
@@ -187,6 +221,11 @@ system:
 # 目标：从含噪 RGB 图像中提取干净的乐高积木 Mask
 # ------------------------------------------------------------------------------
 preprocess:
+  # 是否对 current 图片应用形态学操作（开闭运算）
+  # true: 对 current 图片使用与 goal 相同的形态学预处理
+  # false: current 图片仅进行颜色分割，不使用形态学操作
+  preprocess_current: true
+
   # 颜色分割：红色通常跨越 HSV 的 0 度，需要两个区间
   color_segmentation:
     hsv_range_1:
@@ -195,12 +234,12 @@ preprocess:
     hsv_range_2:
       lower: [170, 100, 70]
       upper: [180, 255, 255]
-  
+
   # 形态学操作：用于填补积木间隙(Closing)和去除噪点(Opening)
   morphology:
     closing:
       kernel_size: 5        # 闭运算核大小 (推荐 5x5)
-      iterations: 2         # 执行次数，次数越多填补能力越强
+      iterations: 1         # 执行次数，次数越多填补能力越强
       kernel_shape: "ellipse" # 核形状: "rect", "cross", "ellipse"
     opening:
       kernel_size: 3        # 开运算核大小 (推荐 3x3)
@@ -222,7 +261,7 @@ metrics:
     # F1-Score 配置
     f1_score:
       epsilon: 1.0e-6       # 防止除零微小量
-    
+
     # Elastic IoU (弹性 IoU) 配置
     elastic_iou:
       enable: true          # 是否启用弹性搜索（若 False 则计算标准 IoU）
@@ -249,31 +288,56 @@ metrics:
       model_name: "dinov2_vitl14" # 可选: vits14, vitb14, vitl14, vitg14
       layer: "cls"          # 提取特征层: "cls" 或 "patch" (本项目推荐 cls)
       resize_input: 224     # DINO 输入尺寸 (通常为 14 的倍数)
-      
-      # 目标渲染：将二值化的 Goal Mask 渲染成 RGB 图以便 DINO 理解
-      goal_render:
-        foreground_color: [200, 0, 0] # 模拟乐高红 (RGB)
-        background_color: [200, 200, 200] # 模拟桌面灰白 (RGB)
 
   # --- D. 感知层 (Perceptual Layer) ---
   perceptual:
     vlm:
-      model_name: "openai/gpt-4o"
+      # model_name: "google/gemini-3-pro-preview"
+      model_name: "openai/gpt-5.2"
       api_key_env_var: "OPENROUTER_API_KEY" # 环境变量名，不要直接写 Key
       base_url: "https://openrouter.ai/api/v1"
-      
+
       # 请求参数
       temperature: 0.0      # 低温度保证评分稳定性
       max_tokens: 1024
       timeout: 30           # 请求超时时间 (秒)
-      max_retries: 5        # 失败重试次数
+      max_retries: 5        # 失败重试次数 All images are black-and-white masks. White pixels represent LEGO bricks filled material. Black pixels represent empty space.
 
       # 提示词模板 (CoT)
       system_prompt: |
-        You are a strict robot manipulation judge evaluating a Lego sweeping task.
-        1. Compare the current pile of Legos with the goal shape.
-        2. Analyze geometric alignment, disconnected parts, and scattered debris. i.e. Identify specific defects: Are there disconnected parts? Is the shape too thin? Is there extra debris outside?
-        3. Output a final score from 0.0 to 1.0 in JSON format: {"reasoning": "...", "score": 0.0}.
+        # Role
+        You are a pragmatic robot evaluator assessing a "Lego Sweeping" task. You understand that sweeping granular objects (small Lego bricks) results in naturally rough edges and noise. **Perfection is not required.** Your goal is to judge if the robot has successfully formed the *semantic shape*.
+
+        # Input
+        - **Image 1**: The Goal Shape (Ideal binary mask).
+        - **Image 2**: The Current Observation (Actual state of bricks).
+
+        # Context & Lenience Guidelines
+        - **Granular Material**: The objects are small bricks. Straight lines will inevitably look jagged or "pixelated." **Do not penalize for jagged edges.**
+        - **Stray Bricks**: A moderate amount of scattered bricks (noise) outside the main shape is acceptable and expected. **Ignore isolated background noise.**
+        - **Focus**: Prioritize **Topological Correctness** (e.g., "Does it look like the letter?") over **Geometric Precision** (e.g., "Are the lines perfectly straight?").
+
+        # Evaluation Criteria (0.1 - 0.9)
+        Please assign a score based on the following relaxed standards:
+
+        - **0.1 (Unrecognizable)**: The bricks are piled randomly. No coherent shape is visible.
+        - **0.3 (Attempted but Failed)**: You can guess what the robot tried to do, but major parts are missing (e.g., an 'E' missing the middle bar) or the shape is broken into disconnected islands.
+        - **0.5 (Passable)**: The shape is clearly recognizable as the target letter/symbol. It may be significantly thicker/thinner than the goal, or have 1-2 moderate gaps, but the identity is unambiguous.
+        - **0.7 (Good Success)**: The shape matches the goal's topology perfectly. The strokes are connected. There might be some fuzzy edges or a few scattered bricks nearby, but the main structure is solid.
+        - **0.9 (Excellent)**: The shape is distinct, correctly oriented, and topologically complete. Even if the borders are wavy or not perfectly aligned with the goal mask pixels, visually, it is a great result for a robot.
+
+        # Reasoning Steps
+        1. **Identify**: Can you instantly recognize the shape in Image 2 as the shape in Image 1 without guessing? If yes, start from score 0.5.
+        2. **Topology Check**: Are all necessary strokes present and connected? (e.g., "Z" has top, diagonal, bottom). If yes, boost score to 0.7+.
+        3. **Noise Tolerance**: Is the noise distracting? If the main shape is prominent enough to ignore the noise, maintain the high score.
+
+        # Output Format
+        {
+          "reasoning": "Brief justification focusing on recognizability and topology...",
+          "score": <float between 0.1 and 0.9>
+        }
+
+
 
 # ------------------------------------------------------------------------------
 # 4. 集成机制 (Ensemble Mechanism)
@@ -283,7 +347,7 @@ ensemble:
   gating:
     enable: true
     threshold: 0.4     # 如果基础几何得分 (Geometric Score) 低于此阈值，直接返回失败，不调用 DINO/VLM
-  
+
   # 各模块权重 (总和应为 1.0)
   weights:
     geometric: 0.35    # IoU/F1: 负责基础重合度
@@ -295,10 +359,25 @@ ensemble:
 # 5. 调试与日志 (Debugging & Logging)
 # ------------------------------------------------------------------------------
 debug:
-  enable_visualization: true  # 是否保存处理过程中的图片 (Mask, Edges, Heatmaps)
-  vis_output_dir: "./logs/vis_eval"
+  # 单张图片模式设置
+  single_image:
+    enable_visualization: true  # 是否保存处理过程中的图片 (Mask, Edges, Heatmaps)
+    save_metrics_to_json: true  # 将每次评估的详细指标保存为 JSON
+
+  # 多张图片/批量模式设置
+  multi_image:
+    enable_visualization: false # 批量模式下通常关闭可视化以提高效率
+    save_metrics_to_json: true  # 保存汇总的 JSON 结果
+
+  vis_output_dir: "./logs"
   log_level: "INFO"           # "DEBUG", "INFO", "WARNING", "ERROR"
-  save_metrics_to_json: true  # 将每次评估的详细指标保存为 JSON
+
+  # 向后兼容的默认设置（当未指定模式时使用）
+  enable_visualization: true
+  save_metrics_to_json: true
+
+  # VLM 调试设置
+  save_vlm_imgs: true        # 是否保存 VLM 的输入图片（调试用）
 ```
 
 ### 3.3 编码与数据传递规范

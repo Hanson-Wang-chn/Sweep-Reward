@@ -3,11 +3,12 @@ Semantic metrics using DINOv2 embeddings.
 Evaluates high-level visual similarity between shapes.
 """
 
+import logging
 import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Set
 
 
 class SemanticMetrics:
@@ -25,14 +26,27 @@ class SemanticMetrics:
             config: Configuration dictionary.
         """
         self.config = config
-        semantic_cfg = config.get("metrics", {}).get("semantic", {}).get("dinov2", {})
+        self.logger = logging.getLogger(__name__)
+        semantic_root = config.get("metrics", {}).get("semantic", {})
+        semantic_cfg = semantic_root.get("dinov2", {})
 
-        # Model parameters
+        # DINOv2 parameters
+        self.dino_enable = semantic_cfg.get("enable", True)
         self.model_repo = semantic_cfg.get("model_repo", "facebookresearch/dinov2")
         self.model_name = semantic_cfg.get("model_name", "dinov2_vitl14")
         self.layer = semantic_cfg.get("layer", "cls")
         self.resize_input = semantic_cfg.get("resize_input", 224)
 
+        # LPIPS parameters
+        lpips_cfg = semantic_root.get("lpips", {})
+        self.lpips_enable = lpips_cfg.get("enable", True)
+        self.lpips_net = lpips_cfg.get("net", "alex")
+        self.lpips_norm_lambda = lpips_cfg.get("normalization_lambda", 5.0)
+
+        # DISTS parameters
+        dists_cfg = semantic_root.get("dists", {})
+        self.dists_enable = dists_cfg.get("enable", True)
+        self.dists_norm_lambda = dists_cfg.get("normalization_lambda", 15.0)
 
         # Device
         system_cfg = config.get("system", {})
@@ -49,11 +63,17 @@ class SemanticMetrics:
         self.hsv_lower_2 = np.array(hsv2.get("lower", [170, 100, 70]))
         self.hsv_upper_2 = np.array(hsv2.get("upper", [180, 255, 255]))
 
-        # Model (lazy loading)
-        self._model = None
+        # Models (lazy loading)
+        self._model = None  # DINOv2
+        self._lpips_model = None
+        self._dists_model = None
+        self._lpips_load_failed = False
+        self._dists_load_failed = False
 
-        # Cached goal embedding
+        # Cached goal representations
         self._cached_goal_embedding: Optional[torch.Tensor] = None
+        self._cached_goal_tensor_01: Optional[torch.Tensor] = None
+        self._cached_goal_mask: Optional[np.ndarray] = None
 
     @property
     def model(self):
@@ -65,6 +85,40 @@ class SemanticMetrics:
             self._model = self._model.to(self.device)
             self._model.eval()
         return self._model
+
+    @property
+    def lpips_model(self):
+        """Lazy load LPIPS model."""
+        if self._lpips_model is None and not self._lpips_load_failed:
+            import lpips
+
+            try:
+                # Forward call handles normalization via `normalize=True`; constructor does not support it.
+                self._lpips_model = lpips.LPIPS(net=self.lpips_net, verbose=False)
+                self._lpips_model = self._lpips_model.to(self.device)
+                self._lpips_model.eval()
+            except Exception as exc:
+                self._lpips_load_failed = True
+                self.lpips_enable = False
+                self.logger.warning("LPIPS model load failed, disabling LPIPS metric: %s", exc)
+                self._lpips_model = None
+        return self._lpips_model
+
+    @property
+    def dists_model(self):
+        """Lazy load DISTS model."""
+        if self._dists_model is None and not self._dists_load_failed:
+            try:
+                from DISTS_pytorch import DISTS
+
+                self._dists_model = DISTS().to(self.device)
+                self._dists_model.eval()
+            except Exception as exc:
+                self._dists_load_failed = True
+                self.dists_enable = False
+                self.logger.warning("DISTS model load failed, disabling DISTS metric: %s", exc)
+                self._dists_model = None
+        return self._dists_model
 
     def mask_to_binary_image(self, mask: np.ndarray) -> np.ndarray:
         """
@@ -128,6 +182,26 @@ class SemanticMetrics:
         binary_image = self.mask_to_binary_image(mask)
 
         return binary_image
+
+    def _prepare_binary_image(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Ensure binary mask is converted to a 3-channel 0/255 image and resized.
+        """
+        image = self.mask_to_binary_image(mask)
+        h, w = image.shape[:2]
+        if h != self.resize_input or w != self.resize_input:
+            image = cv2.resize(
+                image, (self.resize_input, self.resize_input), interpolation=cv2.INTER_LINEAR
+            )
+        return image
+
+    def _to_tensor_01(self, image: np.ndarray) -> torch.Tensor:
+        """
+        Convert a binary RGB image to a torch tensor in [0, 1].
+        """
+        tensor = torch.from_numpy(image.astype(np.float32) / 255.0)
+        tensor = tensor.permute(2, 0, 1).unsqueeze(0).to(self.device)
+        return tensor
 
     def preprocess_image(self, image: np.ndarray) -> torch.Tensor:
         """
@@ -219,71 +293,137 @@ class SemanticMetrics:
         """
         return (cosine_sim + 1.0) / 2.0
 
-    def set_goal(self, goal_mask: np.ndarray) -> torch.Tensor:
+    def set_goal(self, goal_mask: np.ndarray, metrics_to_cache: Optional[Set[str]] = None) -> None:
         """
-        Set and cache goal mask embedding.
-        Should be called once at task start to avoid repeated computation.
-
-        Args:
-            goal_mask: Binary goal mask (H, W), values 0/1.
-
-        Returns:
-            Goal embedding tensor.
+        Cache goal representations for requested semantic metrics.
         """
-        # Convert goal mask to binary image (black-white)
-        goal_image = self.mask_to_binary_image(goal_mask)
+        metrics = set(metrics_to_cache or {"dino", "lpips", "dists"})
+        if not self.dino_enable:
+            metrics.discard("dino")
+        if not self.lpips_enable:
+            metrics.discard("lpips")
+        if not self.dists_enable:
+            metrics.discard("dists")
+        self._cached_goal_mask = goal_mask
 
-        # Extract and cache embedding
-        self._cached_goal_embedding = self.extract_embedding(goal_image)
+        goal_image = self._prepare_binary_image(goal_mask)
+        cache_tensors = {"lpips", "dists"} & metrics
 
-        return self._cached_goal_embedding
+        if "dino" in metrics and self.dino_enable:
+            self._cached_goal_embedding = self.extract_embedding(goal_image)
+        else:
+            self._cached_goal_embedding = None
+
+        if cache_tensors:
+            goal_tensor_01 = self._to_tensor_01(goal_image)
+            self._cached_goal_tensor_01 = goal_tensor_01
+        else:
+            self._cached_goal_tensor_01 = None
 
     def compute(
         self,
-        current_image: np.ndarray,
-        goal_mask: np.ndarray = None,
+        pred_mask: Optional[np.ndarray] = None,
+        goal_mask: Optional[np.ndarray] = None,
+        metrics_to_compute: Optional[Set[str]] = None,
         use_cached_goal: bool = True,
+        current_image: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
         """
-        Compute semantic similarity score.
+        Compute semantic similarity metrics on binary masks.
 
         Args:
-            current_image: Current RGB image (H, W, 3), uint8.
-            goal_mask: Binary goal mask (H, W), values 0/1.
-                       Only needed if use_cached_goal is False.
-            use_cached_goal: Whether to use cached goal embedding.
-
-        Returns:
-            Dictionary containing:
-                - dino_score: Normalized similarity score [0, 1]
-                - cosine_similarity: Raw cosine similarity [-1, 1]
+            pred_mask: Predicted binary mask (H, W), values 0/1.
+            goal_mask: Goal binary mask (H, W), values 0/1 (optional if cached).
+            metrics_to_compute: Subset of semantic metrics to compute.
+            use_cached_goal: Whether to reuse cached goal representations.
+            current_image: Optional RGB image to derive mask if pred_mask is None.
         """
-        # Get goal embedding
-        if use_cached_goal and self._cached_goal_embedding is not None:
-            goal_embedding = self._cached_goal_embedding
-        elif goal_mask is not None:
-            goal_embedding = self.set_goal(goal_mask)
-        else:
-            raise ValueError(
-                "Goal mask must be provided if no cached embedding exists"
-            )
-
-        # Get binary image from current image
-        # (extract mask via color segmentation, then convert to binary image)
-        binary_current = self.get_binary_image_from_current(current_image)
-
-        # Extract binary current image embedding
-        current_embedding = self.extract_embedding(binary_current)
-
-        # Compute similarity
-        cosine_sim = self.compute_cosine_similarity(current_embedding, goal_embedding)
-        normalized_score = self.normalize_similarity(cosine_sim)
-
-        return {
-            "dino_score": normalized_score,
-            "cosine_similarity": cosine_sim,
+        requested = set(metrics_to_compute or {"dino", "lpips", "dists"})
+        if not self.dino_enable:
+            requested.discard("dino")
+        if not self.lpips_enable:
+            requested.discard("lpips")
+        if not self.dists_enable:
+            requested.discard("dists")
+        results: Dict[str, Any] = {
+            "dino_score": None,
+            "cosine_similarity": None,
+            "lpips_distance": None,
+            "lpips_score": None,
+            "dists_distance": None,
+            "dists_score": None,
         }
 
+        if pred_mask is None:
+            if current_image is None:
+                raise ValueError("Either pred_mask or current_image must be provided for semantic metrics.")
+            pred_mask = self.extract_mask_from_image(current_image)
+
+        if goal_mask is None:
+            if use_cached_goal and self._cached_goal_mask is not None:
+                goal_mask = self._cached_goal_mask
+            else:
+                raise ValueError("Goal mask must be provided if no cached goal is available.")
+
+        # Prepare binary images/tensors
+        pred_binary_image = self._prepare_binary_image(pred_mask)
+        goal_binary_image = self._prepare_binary_image(goal_mask)
+
+        goal_tensor_01 = None
+        if ({"lpips", "dists"} & requested):
+            goal_tensor_01 = self._cached_goal_tensor_01 if use_cached_goal else None
+            if goal_tensor_01 is None:
+                goal_tensor_01 = self._to_tensor_01(goal_binary_image)
+                if use_cached_goal:
+                    self._cached_goal_tensor_01 = goal_tensor_01
+
+        # DINO
+        if "dino" in requested and self.dino_enable:
+            if use_cached_goal and self._cached_goal_embedding is not None:
+                goal_embedding = self._cached_goal_embedding
+            else:
+                goal_embedding = self.extract_embedding(goal_binary_image)
+                if use_cached_goal:
+                    self._cached_goal_embedding = goal_embedding
+
+            current_embedding = self.extract_embedding(pred_binary_image)
+            cosine_sim = self.compute_cosine_similarity(current_embedding, goal_embedding)
+            results["cosine_similarity"] = cosine_sim
+            results["dino_score"] = self.normalize_similarity(cosine_sim)
+
+        # LPIPS
+        if "lpips" in requested and self.lpips_enable:
+            lpips_model = self.lpips_model
+            if lpips_model is None:
+                self.logger.debug("LPIPS requested but unavailable; skipping.")
+            else:
+                pred_tensor = self._to_tensor_01(pred_binary_image)
+                goal_tensor = goal_tensor_01 if goal_tensor_01 is not None else self._to_tensor_01(goal_binary_image)
+                with torch.no_grad():
+                    lpips_val = lpips_model(pred_tensor, goal_tensor, normalize=True)
+                    if isinstance(lpips_val, torch.Tensor):
+                        lpips_val = lpips_val.mean()
+                    lpips_val = float(lpips_val.detach().cpu().item())
+                results["lpips_distance"] = lpips_val
+                results["lpips_score"] = float(np.exp(-self.lpips_norm_lambda * lpips_val))
+
+        # DISTS
+        if "dists" in requested and self.dists_enable:
+            dists_model = self.dists_model
+            if dists_model is None:
+                self.logger.debug("DISTS requested but unavailable; skipping.")
+            else:
+                pred_tensor = self._to_tensor_01(pred_binary_image)
+                goal_tensor = goal_tensor_01 if goal_tensor_01 is not None else self._to_tensor_01(goal_binary_image)
+                with torch.no_grad():
+                    dists_val = float(dists_model(pred_tensor, goal_tensor).detach().cpu().item())
+                results["dists_distance"] = dists_val
+                results["dists_score"] = float(np.exp(-self.dists_norm_lambda * dists_val))
+
+        return results
+
     def clear_cache(self):
-        """Clear cached goal embedding."""
+        """Clear cached goal embeddings and tensors."""
         self._cached_goal_embedding = None
+        self._cached_goal_tensor_01 = None
+        self._cached_goal_mask = None

@@ -65,6 +65,13 @@ metrics:
       max_rotation: 10      # 最大旋转角度范围 (degrees)
       step_translation: 2   # 平移搜索步长 (px)
       step_rotation: 2      # 旋转搜索步长 (degrees)
+    sinkhorn:
+      enable: true
+      downsample: 4         # 下采样倍率，降低 Sinkhorn 的计算量
+      epsilon: 0.05         # 熵正则系数，越大越平滑
+      max_iters: 40         # Sinkhorn 迭代次数
+      normalization_lambda: 0.08  # 将散度映射到相似度的缩放系数
+      clip_divergence: 4.0  # 截断过大的散度值，避免数值爆炸
 
   # --- B. 轮廓层 (Contour Layer) ---
   contour:
@@ -82,11 +89,20 @@ metrics:
       model_name: "dinov2_vitl14" # 可选: vits14, vitb14, vitl14, vitg14
       layer: "cls"          # 提取特征层: "cls" 或 "patch" (本项目推荐 cls)
       resize_input: 224     # DINO 输入尺寸 (通常为 14 的倍数)
+      enable: true
+    lpips:
+      enable: true
+      net: "alex"           # 可选: alex, vgg
+      normalization_lambda: 5.0  # 越大惩罚越重
+    dists:
+      enable: true
+      normalization_lambda: 15.0
 
   # --- D. 感知层 (Perceptual Layer) ---
   perceptual:
     vlm:
-      model_name: "google/gemini-3-pro-preview"
+      # model_name: "google/gemini-3-pro-preview"
+      model_name: "openai/gpt-5.2"
       api_key_env_var: "OPENROUTER_API_KEY" # 环境变量名，不要直接写 Key
       base_url: "https://openrouter.ai/api/v1"
 
@@ -139,14 +155,24 @@ ensemble:
   # 门控机制：节省算力
   gating:
     enable: true
+    metric: "f1"       # 门控使用的指标：建议使用 f1
     threshold: 0.4     # 如果基础几何得分 (Geometric Score) 低于此阈值，直接返回失败，不调用 DINO/VLM
 
   # 各模块权重 (总和应为 1.0)
   weights:
-    geometric: 0.35    # IoU/F1: 负责基础重合度
-    contour: 0.25      # Chamfer: 负责边缘细节
-    semantic: 0.20     # DINO: 负责结构与布局
-    perceptual: 0.20   # VLM: 负责人类观感与Corner Case
+    geometric:
+      iou: 0.05
+      elastic_iou: 0.10
+      f1: 0.15
+      sinkhorn: 0.05
+    contour:
+      chamfer: 0.25
+    semantic:
+      dino: 0.12
+      lpips: 0.05
+      dists: 0.03
+    perceptual:
+      vlm: 0.20
 
 # ------------------------------------------------------------------------------
 # 5. 调试与日志 (Debugging & Logging)

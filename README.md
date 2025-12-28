@@ -1,6 +1,6 @@
 # Sweep-Reward: 多模态集成评估模块
 
-**Version 1.4**
+**Version 2.0**
 
 ## 项目概述
 
@@ -12,11 +12,12 @@
 
 - **颜色分割**：基于 HSV 空间的红色乐高积木分割
 - **形态学处理**：闭运算填补空隙，开运算去除噪点
-- **几何层评估**：Elastic IoU 和 F1-Score
+- **几何层评估**：Elastic IoU、F1-Score、Sinkhorn Divergence（EMD 变体）
 - **轮廓层评估**：双向 Chamfer Distance
-- **语义层评估**：DINOv2 嵌入相似度（使用二值图像输入）
+- **语义层评估**：DINOv2、LPIPS、DISTS（全部使用二值图像输入）
 - **感知层评估**：VLM (GPT-4o) Chain-of-Thought 评分（使用二值图像输入）
 - **加权门控机制**：节省计算资源，低分时跳过高成本模块
+- **细粒度权重**：每个指标在 `ensemble/weights` 中独立配置，权重为 0 时直接跳过计算以节约算力
 
 ## 目录结构
 
@@ -54,6 +55,7 @@ Sweep-Reward/
 
 - Python >= 3.11
 - CUDA（推荐，用于 DINOv2 加速）
+- GPU 环境建议使用 CUDA 11.8 + torch==2.7.1，兼容无头服务器（16GB VRAM 为宜）
 
 ### 安装依赖
 
@@ -103,7 +105,7 @@ python main.py --visualize
 # 跳过 VLM 评估（无需 API Key）
 python main.py --skip-vlm
 
-# 跳过 DINOv2 评估（无需下载模型）
+# 跳过语义层评估（DINOv2/LPIPS/DISTS）
 python main.py --skip-dino
 
 # 仅运行基础指标（无需 DINOv2 和 VLM，推荐用于快速测试）
@@ -255,13 +257,25 @@ preprocess:
 ensemble:
   gating:
     enable: true
+    metric: "f1"            # 门控指标（默认 f1）
     threshold: 0.4          # 门控阈值
   weights:
-    geometric: 0.35         # 几何层权重
-    contour: 0.25           # 轮廓层权重
-    semantic: 0.20          # 语义层权重
-    perceptual: 0.20        # 感知层权重
+    geometric:
+      iou: 0.05
+      elastic_iou: 0.10
+      f1: 0.15
+      sinkhorn: 0.05
+    contour:
+      chamfer: 0.25
+    semantic:
+      dino: 0.12
+      lpips: 0.05
+      dists: 0.03
+    perceptual:
+      vlm: 0.20
 ```
+
+*注意：任何指标的权重设为 0 时，评估逻辑会自动跳过该指标的计算（例如可临时关掉 Sinkhorn 或 VLM 以节约时间/显存）。*
 
 ## 输出格式
 
@@ -285,10 +299,10 @@ ensemble:
 ## 评估流程
 
 1. **预处理**：颜色分割 → 形态学处理 → 生成预测掩膜
-2. **几何评估**：计算 Elastic IoU 和 F1-Score
+2. **几何评估**：计算 Elastic IoU、F1-Score、Sinkhorn Divergence
 3. **轮廓评估**：计算双向 Chamfer Distance
 4. **门控检查**：若几何分数低于阈值，直接返回（节省计算）
-5. **语义评估**：使用 DINOv2 计算嵌入相似度
+5. **语义评估**：在二值图上计算 DINOv2 / LPIPS / DISTS
 6. **感知评估**：调用 VLM API 进行 CoT 评分
 7. **加权融合**：计算最终得分
 
@@ -308,6 +322,13 @@ ensemble:
 4. **目标缓存**：`set_goal()` 会缓存目标的 DINOv2 嵌入，避免重复计算
 
 ## 更新日志
+
+### Version 2.0
+- **新增指标**：几何层增加 Sinkhorn Divergence；语义层增加 LPIPS、DISTS（均基于二值图像）
+- **权重细化**：`ensemble/weights` 现在按具体指标配置，权重为 0 时自动跳过计算
+- **门控改进**：可配置门控指标（默认 F1），低分时跳过高成本模块
+- **语义跳过逻辑**：`--skip-dino` 会跳过 DINOv2、LPIPS、DISTS 全部语义特征
+- **Torch 兼容性**：默认与 CUDA 11.8 下的 torch==2.7.1 对齐，适配无头服务器
 
 ### Version 1.4
 - **新增 preprocess_current 参数**：控制是否对 current 图片应用形态学操作

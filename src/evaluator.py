@@ -7,7 +7,7 @@ import logging
 import json
 import os
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Set
 
 import numpy as np
 
@@ -51,13 +51,12 @@ class Evaluator:
         gating_cfg = ensemble_cfg.get("gating", {})
         self.gating_enable = gating_cfg.get("enable", True)
         self.gating_threshold = gating_cfg.get("threshold", 0.4)
+        self.gating_metric = gating_cfg.get("metric", "f1")
 
         # Weights
         weights_cfg = ensemble_cfg.get("weights", {})
-        self.weight_geometric = weights_cfg.get("geometric", 0.35)
-        self.weight_contour = weights_cfg.get("contour", 0.25)
-        self.weight_semantic = weights_cfg.get("semantic", 0.20)
-        self.weight_perceptual = weights_cfg.get("perceptual", 0.20)
+        self.metric_weights = self._load_metric_weights(weights_cfg)
+        self._refresh_weight_cache()
 
         # Debug configuration
         debug_cfg = config.get("debug", {})
@@ -76,7 +75,99 @@ class Evaluator:
         if self.enable_visualization or self.save_metrics_to_json:
             os.makedirs(self.vis_output_dir, exist_ok=True)
 
-    def set_goal(self, goal_mask: np.ndarray) -> None:
+    def _load_metric_weights(self, weights_cfg: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Flatten nested weight configuration into a metric-level mapping.
+        """
+        defaults = {
+            "iou": 0.05,
+            "elastic_iou": 0.10,
+            "f1": 0.15,
+            "sinkhorn": 0.05,
+            "chamfer": 0.25,
+            "dino": 0.12,
+            "lpips": 0.05,
+            "dists": 0.03,
+            "vlm": 0.20,
+        }
+
+        flat = defaults.copy()
+        for key, value in weights_cfg.items():
+            if isinstance(value, dict):
+                for sub_key, sub_val in value.items():
+                    flat[sub_key] = float(sub_val)
+            else:
+                flat[key] = float(value)
+        return flat
+
+    def _refresh_weight_cache(self) -> None:
+        """Recompute active metric sets and weight sums."""
+        self.active_geometric_metrics = {
+            m for m in ["iou", "elastic_iou", "f1", "sinkhorn"]
+            if self.metric_weights.get(m, 0.0) > 0
+        }
+        self.active_contour_metrics = (
+            {"chamfer"} if self.metric_weights.get("chamfer", 0.0) > 0 else set()
+        )
+        self.semantic_active_metrics = {
+            m for m in ["dino", "lpips", "dists"]
+            if self.metric_weights.get(m, 0.0) > 0
+        }
+        self.perceptual_active_metrics = (
+            {"vlm"} if self.metric_weights.get("vlm", 0.0) > 0 else set()
+        )
+
+    def _metric_enabled(self, metric: str, allowed_metrics: Optional[set]) -> bool:
+        """Check if a metric is both weighted and allowed by runtime flags."""
+        if allowed_metrics is not None and metric not in allowed_metrics:
+            return False
+        return self.metric_weights.get(metric, 0.0) > 0
+
+    def _semantic_metrics_requested(
+        self,
+        allowed_metrics: Optional[set],
+        skip_semantic: bool,
+    ) -> Set[str]:
+        """Determine which semantic metrics should be computed."""
+        if skip_semantic:
+            return set()
+        metrics = self.semantic_active_metrics.copy()
+        if allowed_metrics is not None:
+            metrics &= allowed_metrics
+        return metrics
+
+    def aggregate_scores(
+        self,
+        score_map: Dict[str, Optional[float]],
+        allowed_metrics: Optional[Set[str]] = None,
+    ) -> float:
+        """
+        Compute weighted score using available metrics, renormalizing if some are skipped.
+        """
+        active_items = []
+        for name, score in score_map.items():
+            if score is None:
+                continue
+            if allowed_metrics is not None and name not in allowed_metrics:
+                continue
+            weight = self.metric_weights.get(name, 0.0)
+            if weight <= 0:
+                continue
+            active_items.append((weight, score))
+
+        if not active_items:
+            return 0.0
+
+        weight_sum = sum(w for w, _ in active_items)
+        total = sum(w * s for w, s in active_items) / weight_sum
+        return float(total)
+
+    def _build_details(self, score_map: Dict[str, Optional[float]]) -> Dict[str, Optional[float]]:
+        """Return ordered details mapping for downstream logging/visualization."""
+        keys = ["iou", "elastic_iou", "f1", "sinkhorn", "chamfer", "dino", "lpips", "dists", "vlm"]
+        return {k: score_map.get(k) for k in keys}
+
+    def set_goal(self, goal_mask: np.ndarray, semantic_metrics_to_cache: Optional[Set[str]] = None) -> None:
         """
         Set and cache goal mask. Computes goal embeddings.
         Should be called once at task start.
@@ -87,8 +178,9 @@ class Evaluator:
         # Process goal mask
         self._goal_mask = self.preprocessor.process_goal_mask(goal_mask)
 
-        # Cache DINOv2 embedding for goal
-        self.semantic_metrics.set_goal(self._goal_mask)
+        metrics = semantic_metrics_to_cache or self.semantic_active_metrics
+        if metrics:
+            self.semantic_metrics.set_goal(self._goal_mask, metrics_to_cache=metrics)
 
         logger.info("Goal mask set and embeddings cached.")
 
@@ -98,6 +190,9 @@ class Evaluator:
         goal_mask: np.ndarray = None,
         save_debug: bool = None,
         image_index: int = 0,
+        allowed_metrics: Optional[Set[str]] = None,
+        skip_vlm: bool = False,
+        skip_semantic: bool = False,
     ) -> Dict[str, Any]:
         """
         Evaluate current state against goal.
@@ -108,6 +203,9 @@ class Evaluator:
             goal_mask: Goal mask (optional if already set via set_goal).
             save_debug: Whether to save debug outputs (overrides config).
             image_index: Index for distinguishing multiple evaluations when saving VLM images.
+            allowed_metrics: Subset of metrics to evaluate (None means all weighted metrics).
+            skip_vlm: Force-skip VLM evaluation regardless of weight.
+            skip_semantic: Force-skip semantic metrics (DINO/LPIPS/DISTS).
 
         Returns:
             Dictionary containing:
@@ -115,11 +213,23 @@ class Evaluator:
                 - details: Dict with individual metric scores
                 - gating_passed: Whether gating threshold was passed
         """
+        allowed_metrics = set(allowed_metrics) if allowed_metrics is not None else None
+
+        semantic_metrics_to_cache = self._semantic_metrics_requested(allowed_metrics, skip_semantic)
+
         # Handle goal mask
         if goal_mask is not None:
-            self.set_goal(goal_mask)
+            self.set_goal(goal_mask, semantic_metrics_to_cache=semantic_metrics_to_cache)
         elif self._goal_mask is None:
             raise ValueError("Goal mask must be set before evaluation.")
+        elif semantic_metrics_to_cache:
+            needs_cache = False
+            if "dino" in semantic_metrics_to_cache and self.semantic_metrics._cached_goal_embedding is None:
+                needs_cache = True
+            if ({"lpips", "dists"} & semantic_metrics_to_cache) and self.semantic_metrics._cached_goal_tensor_01 is None:
+                needs_cache = True
+            if needs_cache:
+                self.semantic_metrics.set_goal(self._goal_mask, metrics_to_cache=semantic_metrics_to_cache)
 
         goal = self._goal_mask
 
@@ -129,81 +239,105 @@ class Evaluator:
         # Preprocess current image to get prediction mask
         pred_mask, pred_soft_mask = self.preprocessor.process(current_image)
 
-        # === Stage 1: Compute basic metrics (always computed) ===
-        geometric_results = self.geometric_metrics.compute(pred_mask, goal)
-        contour_results = self.contour_metrics.compute(pred_mask, goal)
+        # === Stage 1: Compute basic metrics ===
+        geometric_requests = {
+            m for m in ["iou", "elastic_iou", "f1"] if self._metric_enabled(m, allowed_metrics)
+        }
+        geometric_requests.add(self.gating_metric)
+        geometric_results = self.geometric_metrics.compute(pred_mask, goal, metrics_to_compute=geometric_requests)
 
-        # Use F1 as the geometric score (could also use elastic_iou)
-        s_geo = geometric_results["f1"]
-        s_contour = contour_results["chamfer_score"]
+        contour_results = {}
+        if self._metric_enabled("chamfer", allowed_metrics):
+            contour_results = self.contour_metrics.compute(pred_mask, goal)
 
-        # Initialize results
-        result = {
-            "total_score": 0.0,
-            "details": {
-                "iou": geometric_results["elastic_iou"],
-                "f1": s_geo,
-                "chamfer": s_contour,
-                "dino": None,
-                "vlm": None,
-            },
-            "gating_passed": False,
-            "raw_metrics": {
-                "geometric": geometric_results,
-                "contour": contour_results,
-            },
+        score_map: Dict[str, Optional[float]] = {
+            "iou": geometric_results.get("iou"),
+            "elastic_iou": geometric_results.get("elastic_iou"),
+            "f1": geometric_results.get("f1"),
+            "sinkhorn": geometric_results.get("sinkhorn_score"),
+            "chamfer": contour_results.get("chamfer_score") if contour_results else None,
+            "dino": None,
+            "lpips": None,
+            "dists": None,
+            "vlm": None,
         }
 
-        # === Stage 2: Gating check ===
-        if self.gating_enable and s_geo < self.gating_threshold:
-            # Failed gating - return early with geometric score only
-            logger.info(f"Gating failed: F1={s_geo:.4f} < threshold={self.gating_threshold}")
-            result["total_score"] = s_geo
-            result["gating_passed"] = False
+        gating_value = geometric_results.get(self.gating_metric) or 0.0
+        gating_passed = not self.gating_enable or gating_value >= self.gating_threshold
 
-            # Save debug if requested
+        raw_metrics: Dict[str, Any] = {
+            "geometric": geometric_results,
+        }
+        if contour_results:
+            raw_metrics["contour"] = contour_results
+
+        # Early exit on gating failure to save computation
+        if not gating_passed:
+            result = {
+                "total_score": float(gating_value),
+                "details": self._build_details(score_map),
+                "gating_passed": False,
+                "raw_metrics": raw_metrics,
+                "score_map": score_map,
+            }
             if save_debug or (save_debug is None and self.save_metrics_to_json):
                 self._save_debug_output(result, current_image, pred_mask)
-
             return result
 
-        # === Stage 3: Full evaluation (passed gating) ===
-        result["gating_passed"] = True
+        # === Stage 2: Expensive geometric metric (Sinkhorn) ===
+        if self._metric_enabled("sinkhorn", allowed_metrics):
+            sinkhorn_only = self.geometric_metrics.compute(
+                pred_mask, goal, metrics_to_compute={"sinkhorn"}
+            )
+            score_map["sinkhorn"] = sinkhorn_only.get("sinkhorn_score")
+            geometric_results["sinkhorn_score"] = sinkhorn_only.get("sinkhorn_score")
+            geometric_results["sinkhorn_divergence"] = sinkhorn_only.get("sinkhorn_divergence")
 
-        # Compute semantic score (DINOv2)
-        semantic_results = self.semantic_metrics.compute(
-            current_image, use_cached_goal=True
-        )
-        s_semantic = semantic_results["dino_score"]
-        result["details"]["dino"] = s_semantic
-        result["raw_metrics"]["semantic"] = semantic_results
+        # === Stage 3: Semantic metrics ===
+        if semantic_metrics_to_cache:
+            semantic_results = self.semantic_metrics.compute(
+                pred_mask=pred_mask,
+                goal_mask=goal,
+                metrics_to_compute=semantic_metrics_to_cache,
+                use_cached_goal=True,
+            )
+            score_map["dino"] = semantic_results.get("dino_score")
+            score_map["lpips"] = semantic_results.get("lpips_score")
+            score_map["dists"] = semantic_results.get("dists_score")
+            raw_metrics["semantic"] = semantic_results
 
-        # Compute perceptual score (VLM)
-        try:
-            vlm_results = self.vlm_client.compute(pred_mask, goal, image_index=image_index)
-            s_perceptual = vlm_results["vlm_score"]
-            result["details"]["vlm"] = s_perceptual
-            result["raw_metrics"]["vlm"] = vlm_results
-        except Exception as e:
-            logger.warning(f"VLM scoring failed, using fallback: {e}")
-            s_perceptual = (s_geo + s_contour + s_semantic) / 3
-            result["details"]["vlm"] = s_perceptual
-            result["raw_metrics"]["vlm"] = {"vlm_score": s_perceptual, "reasoning": "fallback"}
+        # === Stage 4: Perceptual metric (VLM) ===
+        vlm_requested = (not skip_vlm) and self._metric_enabled("vlm", allowed_metrics)
+        if vlm_requested:
+            try:
+                vlm_results = self.vlm_client.compute(pred_mask, goal, image_index=image_index)
+                score_map["vlm"] = vlm_results["vlm_score"]
+                raw_metrics["vlm"] = vlm_results
+            except Exception as e:
+                logger.warning(f"VLM scoring failed, using fallback: {e}")
+                non_vlm_scores = [v for k, v in score_map.items() if k != "vlm" and v is not None]
+                fallback = float(np.mean(non_vlm_scores)) if non_vlm_scores else 0.0
+                score_map["vlm"] = fallback
+                raw_metrics["vlm"] = {"vlm_score": fallback, "reasoning": f"fallback: {e}"}
 
-        # === Stage 4: Weighted ensemble ===
-        total_score = (
-            self.weight_geometric * s_geo
-            + self.weight_contour * s_contour
-            + self.weight_semantic * s_semantic
-            + self.weight_perceptual * s_perceptual
-        )
+        # === Stage 5: Weighted ensemble ===
+        total_score = self.aggregate_scores(score_map, allowed_metrics=allowed_metrics)
 
-        result["total_score"] = float(total_score)
+        result = {
+            "total_score": float(total_score),
+            "details": self._build_details(score_map),
+            "gating_passed": True,
+            "raw_metrics": raw_metrics,
+            "score_map": score_map,
+        }
 
         logger.info(
-            f"Evaluation complete: total={total_score:.4f}, "
-            f"geo={s_geo:.4f}, contour={s_contour:.4f}, "
-            f"dino={s_semantic:.4f}, vlm={s_perceptual:.4f}"
+            "Evaluation complete: total=%.4f, geom=%.4f, contour=%s, semantic=%s, vlm=%s",
+            total_score,
+            gating_value,
+            f"{score_map['chamfer']:.4f}" if score_map["chamfer"] is not None else "N/A",
+            f"{score_map['dino']:.4f}" if score_map["dino"] is not None else "N/A",
+            f"{score_map['vlm']:.4f}" if score_map["vlm"] is not None else "N/A",
         )
 
         # Save debug if requested

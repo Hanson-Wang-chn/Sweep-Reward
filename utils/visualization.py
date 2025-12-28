@@ -195,7 +195,7 @@ class Visualizer:
         mask_vis = self.visualize_mask_comparison(pred_mask, goal_mask, current_image)
 
         # Create score panel
-        score_panel = np.zeros((100, mask_vis.shape[1], 3), dtype=np.uint8)
+        score_panel = np.zeros((140, mask_vis.shape[1], 3), dtype=np.uint8)
         score_panel[:] = [40, 40, 40]  # Dark gray background
 
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -207,6 +207,9 @@ class Visualizer:
         f1 = details.get("f1", 0)
         chamfer = details.get("chamfer", 0)
         dino = details.get("dino", "N/A")
+        sinkhorn = details.get("sinkhorn", "N/A")
+        lpips = details.get("lpips", "N/A")
+        dists = details.get("dists", "N/A")
         vlm = details.get("vlm", "N/A")
 
         # Draw scores
@@ -251,7 +254,36 @@ class Visualizer:
         )
         cv2.putText(
             score_panel,
+            f"Sinkhorn: {sinkhorn:.4f}" if isinstance(sinkhorn, float) else f"Sinkhorn: {sinkhorn}",
+            (200, y_offset),
+            font,
+            0.5,
+            (200, 200, 200),
+            1,
+        )
+        cv2.putText(
+            score_panel,
             f"DINO: {dino:.4f}" if isinstance(dino, float) else f"DINO: {dino}",
+            (380, y_offset),
+            font,
+            0.5,
+            (200, 200, 200),
+            1,
+        )
+
+        y_offset = 85
+        cv2.putText(
+            score_panel,
+            f"LPIPS: {lpips:.4f}" if isinstance(lpips, float) else f"LPIPS: {lpips}",
+            (10, y_offset),
+            font,
+            0.5,
+            (200, 200, 200),
+            1,
+        )
+        cv2.putText(
+            score_panel,
+            f"DISTS: {dists:.4f}" if isinstance(dists, float) else f"DISTS: {dists}",
             (200, y_offset),
             font,
             0.5,
@@ -261,7 +293,7 @@ class Visualizer:
         cv2.putText(
             score_panel,
             f"VLM: {vlm:.4f}" if isinstance(vlm, float) else f"VLM: {vlm}",
-            (350, y_offset),
+            (380, y_offset),
             font,
             0.5,
             (200, 200, 200),
@@ -272,7 +304,7 @@ class Visualizer:
         gating = result.get("gating_passed", False)
         gating_text = "Gating: PASSED" if gating else "Gating: FAILED"
         gating_color = (0, 255, 0) if gating else (0, 0, 255)
-        cv2.putText(score_panel, gating_text, (10, 85), font, 0.5, gating_color, 1)
+        cv2.putText(score_panel, gating_text, (10, 120), font, 0.5, gating_color, 1)
 
         # Combine
         vis = np.concatenate([mask_vis, score_panel], axis=0)

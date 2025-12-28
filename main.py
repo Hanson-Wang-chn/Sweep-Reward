@@ -25,84 +25,30 @@ def run_basic_evaluation(config, current_image, goal_mask, output_dir):
     Run basic evaluation using only geometric and contour metrics.
     Does not require DINOv2 or VLM.
     """
-    from src.preprocessor import Preprocessor
-    from src.metrics.geometric import GeometricMetrics
-    from src.metrics.contour import ContourMetrics
+    from src.evaluator import Evaluator
+    from src.metrics.semantic import SemanticMetrics
 
-    # Initialize modules
-    preprocessor = Preprocessor(config)
-    geometric_metrics = GeometricMetrics(config)
-    contour_metrics = ContourMetrics(config)
+    # Ensure debug output directory matches CLI argument
+    debug_cfg = config.get("debug", {})
+    debug_cfg["vis_output_dir"] = output_dir
+    config["debug"] = debug_cfg
 
-    # Process images
-    current_image = preprocessor.resize_image(current_image)
-    pred_mask, _ = preprocessor.process(current_image)
-    goal_processed = preprocessor.process_goal_mask(goal_mask)
+    evaluator = Evaluator(config)
+    allowed_metrics = {"iou", "elastic_iou", "f1", "sinkhorn", "chamfer"}
 
-    # Compute metrics
-    geo_results = geometric_metrics.compute(pred_mask, goal_processed)
-    contour_results = contour_metrics.compute(pred_mask, goal_processed)
+    result = evaluator.evaluate(
+        current_image,
+        goal_mask=goal_mask,
+        save_debug=True,
+        allowed_metrics=allowed_metrics,
+        skip_vlm=True,
+        skip_semantic=True,
+    )
+    result["mode"] = "basic_only"
 
-    # Get weights from config
-    weights = config.get("ensemble", {}).get("weights", {})
-    w_geo = weights.get("geometric", 0.35)
-    w_contour = weights.get("contour", 0.25)
-
-    # Normalize weights for basic-only mode
-    total_w = w_geo + w_contour
-    w_geo_norm = w_geo / total_w
-    w_contour_norm = w_contour / total_w
-
-    # Compute total score
-    s_geo = geo_results["f1"]
-    s_contour = contour_results["chamfer_score"]
-    total_score = w_geo_norm * s_geo + w_contour_norm * s_contour
-
-    # Build result
-    result = {
-        "total_score": total_score,
-        "details": {
-            "iou": geo_results["elastic_iou"],
-            "f1": s_geo,
-            "chamfer": s_contour,
-            "dino": None,
-            "vlm": None,
-        },
-        "gating_passed": s_geo >= config.get("ensemble", {}).get("gating", {}).get("threshold", 0.4),
-        "raw_metrics": {
-            "geometric": geo_results,
-            "contour": contour_results,
-        },
-        "mode": "basic_only",
-    }
-
-    # Save metrics to JSON
-    if config.get("debug", {}).get("save_metrics_to_json", True):
-        os.makedirs(output_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        json_path = os.path.join(output_dir, f"metrics_{timestamp}.json")
-
-        # Make serializable
-        def make_serializable(obj):
-            if isinstance(obj, dict):
-                return {k: make_serializable(v) for k, v in obj.items()}
-            elif isinstance(obj, (list, tuple)):
-                return [make_serializable(v) for v in obj]
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, (np.integer, np.floating)):
-                return float(obj)
-            elif isinstance(obj, np.bool_):
-                return bool(obj)
-            return obj
-
-        with open(json_path, "w") as f:
-            json.dump(make_serializable(result), f, indent=2)
-
-    # Save visualization outputs if enabled
+    # Save goal binary image for reference if visualization is enabled
     if config.get("debug", {}).get("enable_visualization", False):
-        # Save goal binary image
-        from src.metrics.semantic import SemanticMetrics
+        goal_processed = evaluator.preprocessor.process_goal_mask(goal_mask)
         semantic_metrics = SemanticMetrics(config)
         goal_binary = semantic_metrics.mask_to_binary_image(goal_processed)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -273,173 +219,91 @@ def run_multi_image_evaluation(
     Returns:
         List of evaluation results.
     """
+    from src.evaluator import Evaluator
+
     results = []
 
-    if basic_only or (skip_vlm and skip_dino):
-        # Basic-only mode: sequential processing
-        logger.info("Running basic metrics only for multiple images...")
-        for i, (image, path) in enumerate(zip(current_images, image_paths)):
-            logger.info(f"Processing image {i + 1}/{len(current_images)}: {os.path.basename(path)}")
-            result = run_basic_evaluation(config, image, goal_mask, output_dir)
-            result["image_path"] = path
-            results.append(result)
-    else:
-        # Full evaluation with concurrent VLM calls
-        from src.evaluator import Evaluator
-        from src.preprocessor import Preprocessor
-        from src.metrics.geometric import GeometricMetrics
-        from src.metrics.contour import ContourMetrics
-        from src.metrics.semantic import SemanticMetrics
-        from src.vlm_client import VLMClient
+    # Build allowed metric set
+    full_metric_set = {"iou", "elastic_iou", "f1", "sinkhorn", "chamfer", "dino", "lpips", "dists", "vlm"}
+    allowed_metrics = set(full_metric_set)
+    if basic_only:
+        allowed_metrics = {"iou", "elastic_iou", "f1", "sinkhorn", "chamfer"}
+        skip_vlm = True
+        skip_dino = True
+    if skip_vlm:
+        allowed_metrics.discard("vlm")
+    if skip_dino:
+        allowed_metrics -= {"dino", "lpips", "dists"}
 
-        logger.info("Initializing evaluator...")
-        evaluator = Evaluator(config)
+    logger.info("Initializing evaluator...")
+    evaluator = Evaluator(config)
 
-        # Adjust weights if skipping modules
-        if skip_vlm:
-            logger.info("Skipping VLM evaluation (--skip-vlm flag set)")
-            evaluator.weight_perceptual = 0.0
-            total_other = (
-                evaluator.weight_geometric
-                + evaluator.weight_contour
-                + evaluator.weight_semantic
-            )
-            if total_other > 0:
-                scale = 1.0 / total_other
-                evaluator.weight_geometric *= scale
-                evaluator.weight_contour *= scale
-                evaluator.weight_semantic *= scale
+    semantic_to_cache = evaluator._semantic_metrics_requested(allowed_metrics, skip_semantic=skip_dino)
+    evaluator.set_goal(goal_mask, semantic_metrics_to_cache=semantic_to_cache)
 
-        # Set goal mask ONCE (caches DINOv2 embedding)
-        logger.info("Setting goal mask (computing DINOv2 embedding once)...")
-        evaluator.set_goal(goal_mask)
+    # Stage 1: compute all non-VLM metrics
+    logger.info("Computing geometric/contour/semantic metrics...")
+    base_results = []
+    for i, (image, path) in enumerate(zip(current_images, image_paths)):
+        logger.info(f"Processing image {i + 1}/{len(current_images)}: {os.path.basename(path)}")
+        base = evaluator.evaluate(
+            image,
+            save_debug=False,
+            allowed_metrics=allowed_metrics,
+            skip_vlm=True,
+            skip_semantic=skip_dino,
+        )
+        base["image_path"] = path
+        base_results.append(base)
 
-        # Pre-compute geometric/contour/DINO metrics sequentially
-        # (DINO uses cached goal embedding)
+    # Stage 2: VLM calls if requested
+    vlm_requested = (not skip_vlm) and evaluator.metric_weights.get("vlm", 0.0) > 0 and "vlm" in allowed_metrics
+    if vlm_requested:
+        goal_processed = evaluator._goal_mask
         preprocessor = evaluator.preprocessor
-        geometric_metrics = evaluator.geometric_metrics
-        contour_metrics = evaluator.contour_metrics
-        semantic_metrics = evaluator.semantic_metrics
         vlm_client = evaluator.vlm_client
 
-        goal_processed = evaluator._goal_mask
+        tasks = [
+            (idx, base)
+            for idx, base in enumerate(base_results)
+            if base.get("gating_passed", False)
+        ]
 
-        # Stage 1: Compute non-VLM metrics (can be parallelized on GPU for DINO)
-        logger.info("Computing geometric, contour, and semantic metrics...")
-        intermediate_results = []
+        if tasks:
+            logger.info(f"Running concurrent VLM calls for {len(tasks)} images...")
 
-        for i, (image, path) in enumerate(zip(current_images, image_paths)):
-            logger.info(f"Processing image {i + 1}/{len(current_images)}: {os.path.basename(path)}")
+            def call_vlm(idx_and_result):
+                idx, base = idx_and_result
+                current_image = current_images[idx]
+                current_resized = preprocessor.resize_image(current_image)
+                pred_mask, _ = preprocessor.process(current_resized)
+                try:
+                    vlm_result = vlm_client.compute(pred_mask, goal_processed, image_index=idx)
+                    score = vlm_result["vlm_score"]
+                except Exception as e:
+                    logger.warning(f"VLM call failed for {base['image_path']}: {e}")
+                    non_vlm_scores = [
+                        v for k, v in base.get("score_map", {}).items()
+                        if k != "vlm" and v is not None
+                    ]
+                    score = float(np.mean(non_vlm_scores)) if non_vlm_scores else 0.0
+                    vlm_result = {"vlm_score": score, "reasoning": f"VLM failed: {e}"}
+                return idx, vlm_result, score
 
-            # Resize and process
-            current_resized = preprocessor.resize_image(image)
-            pred_mask, _ = preprocessor.process(current_resized)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(call_vlm, task): task for task in tasks}
+                for future in as_completed(futures):
+                    idx, vlm_result, vlm_score = future.result()
+                    base_results[idx].setdefault("raw_metrics", {})["vlm"] = vlm_result
+                    base_results[idx].setdefault("score_map", {})["vlm"] = vlm_score
 
-            # Compute base metrics
-            geo_results = geometric_metrics.compute(pred_mask, goal_processed)
-            contour_results = contour_metrics.compute(pred_mask, goal_processed)
-
-            s_geo = geo_results["f1"]
-            s_contour = contour_results["chamfer_score"]
-
-            # Check gating
-            gating_threshold = config.get("ensemble", {}).get("gating", {}).get("threshold", 0.4)
-            gating_passed = s_geo >= gating_threshold
-
-            intermediate = {
-                "image_path": path,
-                "current_image": current_resized,
-                "pred_mask": pred_mask,
-                "geo_results": geo_results,
-                "contour_results": contour_results,
-                "s_geo": s_geo,
-                "s_contour": s_contour,
-                "gating_passed": gating_passed,
-                "s_semantic": None,
-                "s_perceptual": None,
-            }
-
-            if gating_passed and not skip_dino:
-                # Compute semantic (DINO) score
-                semantic_results = semantic_metrics.compute(current_resized, use_cached_goal=True)
-                intermediate["s_semantic"] = semantic_results["dino_score"]
-                intermediate["semantic_results"] = semantic_results
-
-            intermediate_results.append(intermediate)
-
-        # Stage 2: Concurrent VLM calls (only for images that passed gating)
-        if not skip_vlm:
-            images_for_vlm = [
-                (i, r) for i, r in enumerate(intermediate_results)
-                if r["gating_passed"]
-            ]
-
-            if images_for_vlm:
-                logger.info(f"Running concurrent VLM calls for {len(images_for_vlm)} images...")
-
-                def call_vlm(idx_and_result):
-                    idx, result = idx_and_result
-                    try:
-                        vlm_result = vlm_client.compute(result["pred_mask"], goal_processed, image_index=idx)
-                        return idx, vlm_result
-                    except Exception as e:
-                        logger.warning(f"VLM call failed for {result['image_path']}: {e}")
-                        # Fallback score
-                        s_fallback = (result["s_geo"] + result["s_contour"] +
-                                     (result["s_semantic"] or 0.5)) / 3
-                        return idx, {"vlm_score": s_fallback, "reasoning": f"VLM failed: {e}"}
-
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {executor.submit(call_vlm, item): item for item in images_for_vlm}
-                    for future in as_completed(futures):
-                        idx, vlm_result = future.result()
-                        intermediate_results[idx]["s_perceptual"] = vlm_result["vlm_score"]
-                        intermediate_results[idx]["vlm_results"] = vlm_result
-
-        # Stage 3: Compute final scores
-        logger.info("Computing final scores...")
-        for r in intermediate_results:
-            if not r["gating_passed"]:
-                # Failed gating
-                total_score = r["s_geo"]
-            else:
-                s_geo = r["s_geo"]
-                s_contour = r["s_contour"]
-                s_semantic = r["s_semantic"] if r["s_semantic"] is not None else 0.5
-                s_perceptual = r["s_perceptual"] if r["s_perceptual"] is not None else (
-                    (s_geo + s_contour + s_semantic) / 3
-                )
-
-                total_score = (
-                    evaluator.weight_geometric * s_geo
-                    + evaluator.weight_contour * s_contour
-                    + evaluator.weight_semantic * s_semantic
-                    + evaluator.weight_perceptual * s_perceptual
-                )
-
-            result = {
-                "image_path": r["image_path"],
-                "total_score": float(total_score),
-                "details": {
-                    "iou": r["geo_results"]["elastic_iou"],
-                    "f1": r["s_geo"],
-                    "chamfer": r["s_contour"],
-                    "dino": r.get("s_semantic"),
-                    "vlm": r.get("s_perceptual"),
-                },
-                "gating_passed": r["gating_passed"],
-                "raw_metrics": {
-                    "geometric": r["geo_results"],
-                    "contour": r["contour_results"],
-                },
-            }
-
-            if "semantic_results" in r:
-                result["raw_metrics"]["semantic"] = r["semantic_results"]
-            if "vlm_results" in r:
-                result["raw_metrics"]["vlm"] = r["vlm_results"]
-
-            results.append(result)
+    # Stage 3: Finalize totals (recompute if VLM was added)
+    for base in base_results:
+        if "score_map" in base:
+            base["details"] = evaluator._build_details(base["score_map"])
+            if base.get("gating_passed", False):
+                base["total_score"] = evaluator.aggregate_scores(base["score_map"], allowed_metrics=allowed_metrics)
+        results.append(base)
 
     return results
 
@@ -564,7 +428,7 @@ def main():
     parser.add_argument(
         "--skip-dino",
         action="store_true",
-        help="Skip DINOv2 evaluation (useful when model not available)",
+        help="Skip semantic metrics (DINOv2/LPIPS/DISTS) when model weights are unavailable",
     )
     parser.add_argument(
         "--basic-only",
@@ -643,6 +507,18 @@ def main():
         logger.error("No valid images loaded.")
         sys.exit(1)
 
+    # Determine which metrics are allowed based on CLI flags
+    full_metric_set = {"iou", "elastic_iou", "f1", "sinkhorn", "chamfer", "dino", "lpips", "dists", "vlm"}
+    allowed_metrics = set(full_metric_set)
+    if args.basic_only:
+        allowed_metrics = {"iou", "elastic_iou", "f1", "sinkhorn", "chamfer"}
+        args.skip_vlm = True
+        args.skip_dino = True
+    if args.skip_vlm:
+        allowed_metrics.discard("vlm")
+    if args.skip_dino:
+        allowed_metrics -= {"dino", "lpips", "dists"}
+
     # Generate timestamp for output files
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -678,26 +554,18 @@ def main():
 
             # Set goal mask (caches DINOv2 embedding)
             logger.info("Setting goal mask...")
-            evaluator.set_goal(goal_mask)
+            semantic_to_cache = evaluator._semantic_metrics_requested(allowed_metrics, skip_semantic=args.skip_dino)
+            evaluator.set_goal(goal_mask, semantic_metrics_to_cache=semantic_to_cache)
 
             # Run evaluation
             logger.info("Running evaluation...")
-
-            if args.skip_vlm:
-                logger.info("Skipping VLM evaluation (--skip-vlm flag set)")
-                evaluator.weight_perceptual = 0.0
-                total_other = (
-                    evaluator.weight_geometric
-                    + evaluator.weight_contour
-                    + evaluator.weight_semantic
-                )
-                if total_other > 0:
-                    scale = 1.0 / total_other
-                    evaluator.weight_geometric *= scale
-                    evaluator.weight_contour *= scale
-                    evaluator.weight_semantic *= scale
-
-            result = evaluator.evaluate(current_image, save_debug=True)
+            result = evaluator.evaluate(
+                current_image,
+                save_debug=True,
+                allowed_metrics=allowed_metrics,
+                skip_vlm=args.skip_vlm,
+                skip_semantic=args.skip_dino,
+            )
 
         result["image_path"] = valid_paths[0]
         results = [result]
